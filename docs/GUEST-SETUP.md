@@ -103,3 +103,39 @@ only — there is no clipboard channel for Linux guests, in this runner or any
 other one built on the framework. The `VZVirtioSocketDevice` is already in the
 configuration for exactly this reason; a vsock clipboard agent is the planned
 route. Until then, `/mnt/mac` is the shared surface.
+
+## Troubleshooting
+
+### The installer hangs at "Scanning the mirror..."
+
+A host VPN is the usual cause. `VZNATNetworkDeviceAttachment` sends guest
+traffic out through the host's network stack, so whatever the host's default
+route is, the guest inherits its problems.
+
+Check for a tunnel that owns the default route:
+
+```sh
+netstat -rn | grep '^default'
+scutil --nc list
+ifconfig utun22   # whichever interface the default route names
+```
+
+A WireGuard tunnel typically runs at **MTU 1380** while the guest NIC assumes
+1500. Small packets get through, so DNS resolves and the TCP handshake
+completes — the installer reaches "Scanning the mirror" and then stalls at a
+few percent when the first full-size response packet is silently dropped.
+`<Cancel>` appears frozen because the process is blocked in a socket read.
+
+**Disconnect the VPN**, then in the installer go back to the main menu and re-run
+*Configure the package manager*. Nothing already written to disk is lost.
+
+To keep a VPN running alongside the guest, either exclude the VM subnet from the
+tunnel (split tunnelling) or match the guest MTU to the tunnel's:
+
+```sh
+sudo ip link set dev enp0s1 mtu 1380
+```
+
+Persist it in `/etc/systemd/network/` or via NetworkManager once the desktop is
+up. `nofail` is already set on the virtiofs mounts above so a networking problem
+never blocks boot.
