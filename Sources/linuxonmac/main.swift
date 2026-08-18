@@ -131,7 +131,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let configuration = try builder.makeConfiguration()
-            let session = VMSession(configuration: configuration, fullscreen: options.fullscreen)
+            let session = VMSession(
+                configuration: configuration,
+                fullscreen: options.fullscreen,
+                sharedFolderURL: share
+            )
             self.session = session
             session.start()
         } catch {

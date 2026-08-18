@@ -4,12 +4,20 @@ import Virtualization
 /// Owns the virtual machine and the single fullscreen window it lives in.
 /// Everything here runs on the main queue, which is the queue `VZVirtualMachine`
 /// is created on and therefore the only one allowed to touch it.
-final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
+final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMActions {
     private let machine: VZVirtualMachine
     private let canSuspend: Bool
     private let window: NSWindow
     private let view: VZVirtualMachineView
     private let startFullscreen: Bool
+    let sharedFolderURL: URL
+
+    private var clipboard: ClipboardBridge?
+    private var menus: MenuController?
+
+    /// Set while a restart is in flight so `guestDidStop` boots again instead of
+    /// terminating the app.
+    private var isRestarting = false
 
     /// True once we have handed the guest a shutdown or a save, so the
     /// stop callbacks know the exit was intentional.
@@ -29,9 +37,10 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         }
     }
 
-    init(configuration: VZVirtualMachineConfiguration, fullscreen: Bool) {
+    init(configuration: VZVirtualMachineConfiguration, fullscreen: Bool, sharedFolderURL: URL) {
         machine = VZVirtualMachine(configuration: configuration)
         startFullscreen = fullscreen
+        self.sharedFolderURL = sharedFolderURL
 
         // Not every device combination can be frozen to disk. Ask once, up front,
         // so closing the window never blocks on a save that was always going to fail.
@@ -65,6 +74,7 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         // rather than sharing the desktop it was launched from.
         window.collectionBehavior = [.fullScreenPrimary, .managed]
         machine.delegate = self
+        menus = MenuController(actions: self)
     }
 
     // MARK: - Lifecycle
@@ -88,6 +98,7 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                     try await machine.start()
                     Log.info("Booting.")
                 }
+                self.attachClipboardBridge()
             } catch {
                 self.fail("Could not start the virtual machine: \(error.localizedDescription)")
             }
@@ -104,11 +115,103 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             try? FileManager.default.removeItem(at: state)
             try await machine.resume()
             Log.info("Resumed from saved state.")
+            attachClipboardBridge()
         } catch {
             Log.warn("Saved state could not be restored (\(error.localizedDescription)). Cold booting.")
             try? FileManager.default.removeItem(at: state)
             try await machine.start()
         }
+    }
+
+    /// The socket device only exists on a started machine, so this cannot run
+    /// any earlier than the first successful start or restore.
+    @MainActor
+    private func attachClipboardBridge() {
+        guard clipboard == nil,
+              let socket = machine.socketDevices.first as? VZVirtioSocketDevice
+        else { return }
+        let bridge = ClipboardBridge(device: socket)
+        bridge.onStateChange = { connected in
+            Log.info("Clipboard bridge \(connected ? "connected" : "disconnected").")
+        }
+        clipboard = bridge
+        bridge.start()
+    }
+
+    // MARK: - VMActions
+
+    var isPaused: Bool { machine.state == .paused }
+    var capturesSystemKeys: Bool { view.capturesSystemKeys }
+    var clipboardSyncEnabled: Bool { clipboard?.isEnabled ?? false }
+    var clipboardConnected: Bool { clipboard?.isConnected ?? false }
+
+    func suspendAndQuitFromMenu() { NSApp.terminate(nil) }
+
+    func shutDownGuest() {
+        guard machine.canRequestStop else { return }
+        try? machine.requestStop()
+    }
+
+    func forceStopGuest() {
+        Task { @MainActor in try? await machine.stop() }
+    }
+
+    func restartGuest() {
+        guard machine.canRequestStop else { return }
+        isRestarting = true
+        try? machine.requestStop()
+    }
+
+    func togglePause() {
+        Task { @MainActor in
+            do {
+                if machine.state == .paused {
+                    try await machine.resume()
+                } else if machine.state == .running {
+                    try await machine.pause()
+                }
+            } catch {
+                Log.error("Pause/resume failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func toggleFullScreen() { window.toggleFullScreen(nil) }
+
+    func toggleCaptureSystemKeys() { view.capturesSystemKeys.toggle() }
+
+    func toggleClipboardSync() {
+        guard let clipboard else { return }
+        clipboard.isEnabled.toggle()
+        Log.info("Clipboard sync \(clipboard.isEnabled ? "on" : "off").")
+    }
+
+    func pushClipboardToGuest() { clipboard?.pushNow() }
+
+    func openSharedFolder() { NSWorkspace.shared.open(sharedFolderURL) }
+
+    func revealVMBundle() {
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: Paths.bundle.path)
+    }
+
+    private var sshCommand: String {
+        let host = GuestNetwork.guestIP ?? "192.168.64.7"
+        return "ssh -i ~/.ssh/linuxonmac \(NSUserName())@\(host)"
+    }
+
+    func copySSHCommand() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(sshCommand, forType: .string)
+        Log.info("Copied: \(sshCommand)")
+    }
+
+    func openTerminalSession() {
+        let script = "tell application \"Terminal\" to do script \"\(sshCommand)\"\ntell application \"Terminal\" to activate"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
     }
 
     /// Suspend to disk so the next launch is instant. Falls back to a graceful
@@ -183,6 +286,24 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         Log.info("Guest powered off.")
         markInstalledIfNeeded()
+
+        if isRestarting {
+            isRestarting = false
+            clipboard?.stop()
+            clipboard = nil
+            Task { @MainActor in
+                do {
+                    try await machine.start()
+                    Log.info("Restarted.")
+                    attachClipboardBridge()
+                } catch {
+                    Log.error("Restart failed: \(error.localizedDescription)")
+                    NSApp.terminate(nil)
+                }
+            }
+            return
+        }
+
         isWindingDown = true
         NSApp.terminate(nil)
     }
