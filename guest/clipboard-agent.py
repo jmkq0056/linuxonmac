@@ -17,7 +17,6 @@ import time
 
 PORT = 7788
 MAX_BYTES = 4 * 1024 * 1024
-POLL_SECONDS = 0.35
 
 # Guards `suppressed`, which is the whole loop-prevention scheme: whatever we
 # just wrote locally must not be read back and echoed to the host.
@@ -29,19 +28,35 @@ def digest(text):
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
-def read_local():
-    try:
-        result = subprocess.run(
-            ["wl-paste", "--no-newline", "--type", "text/plain;charset=utf-8"],
-            capture_output=True, timeout=4,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    if len(result.stdout) > MAX_BYTES:
-        return None
-    return result.stdout.decode("utf-8", "replace")
+def watcher():
+    """One long-lived `wl-paste --watch` that emits a NUL-terminated record on
+    every clipboard change.
+
+    An earlier version polled `wl-paste` several times a second. That is a
+    process spawn per poll, thousands per hour, for a clipboard that changes a
+    handful of times a minute — and the guest's sshd eventually stopped being
+    able to fork. Waiting on an event costs nothing while idle.
+    """
+    return subprocess.Popen(
+        ["wl-paste", "--type", "text/plain;charset=utf-8",
+         "--watch", "sh", "-c", "cat; printf '\\0'"],
+        stdout=subprocess.PIPE,
+    )
+
+
+def records(stream):
+    """Yield NUL-delimited clipboard payloads as they arrive."""
+    buffer = bytearray()
+    while True:
+        chunk = stream.read(1)
+        if not chunk:
+            return
+        if chunk == b"\0":
+            if len(buffer) <= MAX_BYTES:
+                yield bytes(buffer).decode("utf-8", "replace")
+            buffer.clear()
+        else:
+            buffer.extend(chunk)
 
 
 def write_local(text):
@@ -103,22 +118,16 @@ def reader(conn, stop):
     stop.set()
 
 
-def serve(conn):
+def serve(conn, stream):
     global suppressed
     stop = threading.Event()
     threading.Thread(target=reader, args=(conn, stop), daemon=True).start()
 
     last_sent = None
-    # Whatever is already on the guest clipboard predates the connection; adopt
-    # it silently so reconnecting does not shove stale text at the host.
-    current = read_local()
-    if current:
-        last_sent = digest(current)
-
-    while not stop.is_set():
-        time.sleep(POLL_SECONDS)
-        text = read_local()
-        if text is None or text == "":
+    for text in records(stream):
+        if stop.is_set():
+            break
+        if not text:
             continue
         fingerprint = digest(text)
         if fingerprint == last_sent:
@@ -142,14 +151,20 @@ def main():
     listener.listen(1)
     print(f"clipboard agent listening on vsock port {PORT}", flush=True)
 
+    stream = watcher()
+    print("watching the clipboard for changes", flush=True)
+
     while True:
         conn, addr = listener.accept()
         print(f"host connected from cid {addr[0]}", flush=True)
         try:
-            serve(conn)
+            serve(conn, stream.stdout)
         finally:
             conn.close()
             print("host disconnected", flush=True)
+        if stream.poll() is not None:
+            stream = watcher()
+            print("clipboard watcher restarted", flush=True)
 
 
 if __name__ == "__main__":
