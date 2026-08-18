@@ -148,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Closing the window suspends the guest to disk rather than killing it,
     /// so the next launch resumes instead of booting.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let session else { return .terminateNow }
+        guard let session, !session.canTerminateImmediately else { return .terminateNow }
         Task { @MainActor in await session.suspendAndQuit() }
         return .terminateLater
     }

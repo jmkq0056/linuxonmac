@@ -93,13 +93,14 @@ and the desktop that stays fast under virtio-gpu.
 # 1. Grab the installer (701 MB)
 #    https://cdimage.debian.org/debian-cd/current/arm64/iso-cd/
 
-# 2. Build the runner — ad-hoc signed with com.apple.security.virtualization
-./scripts/build.sh
+# 2. Build and install to /Applications
+./scripts/build.sh && ./scripts/install.sh
 
-# 3. Install. Windowed, because the installer at native retina is microscopic.
+# 3. Install the guest. Windowed, because the installer at native retina
+#    is microscopic.
 ./scripts/run.sh --windowed --iso ~/Downloads/debian-13.6.0-arm64-netinst.iso
 
-# 4. Everyday use — fullscreen on its own Space, boots from disk
+# 4. Everyday use — open it from Spotlight, or:
 ./scripts/launch.sh
 ```
 
@@ -131,10 +132,15 @@ go to `~/Library/Application Support/linuxonmac/linuxonmac.log`.
 - `capturesSystemKeys` so Cmd-Tab and friends reach the guest
 - virtiofs share of `$HOME`, plus Rosetta when it is installed
 - NAT networking, virtio sound in/out, entropy, balloon, vsock
-- **Suspend to disk on window close, resume on next launch** — the state file is
-  consumed on restore so a failed resume can never be replayed, and the
-  configuration is checked with `validateSaveRestoreSupport()` up front so
-  closing never blocks on a save that was always going to fail
+- **Suspend to disk on window close, resume on next launch** — measured at ~2s
+  to resume a live Plasma session. The state file is consumed on restore so a
+  failed resume can never be replayed, and the configuration is checked with
+  `validateSaveRestoreSupport()` up front so closing never blocks on a save that
+  was always going to fail
+- A pinned MAC and scanout. Restore compares the whole configuration against the
+  saved state and fails with a bare `invalid argument` on any mismatch, so
+  anything generated per launch — a random MAC, a scanout read from whichever
+  display is attached — silently turns every resume into a cold boot
 
 Everything lives in one bundle at
 `~/Library/Application Support/linuxonmac/Debian.vm/` — move it, back it up, or
@@ -159,6 +165,9 @@ delete it as a unit.
 - [x] virtiofs share of `$HOME`, plus Rosetta
 - [x] Window launching fullscreen on its own Space
 - [x] Suspend / resume
+- [x] Persistent guest identity — machine id, MAC, scanout — so resume works and
+      the guest keeps one DHCP lease
+- [x] App icon that actually renders in the Dock
 - [ ] Global hotkey to jump straight into the session
 - [ ] vsock clipboard agent (the framework has no clipboard channel for Linux guests)
 - [ ] `VZLinuxBootLoader` mode — boot a raw kernel + initrd straight from a host

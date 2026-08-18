@@ -15,6 +15,20 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     /// stop callbacks know the exit was intentional.
     private var isWindingDown = false
 
+    /// `replyToApplicationShouldTerminate:` must be called exactly once, and
+    /// only in response to a pending `.terminateLater`. Replying twice, or
+    /// replying with nothing pending, leaves the app wedged and never exiting.
+    private var hasRepliedToTermination = false
+
+    /// Nothing left to save once the guest has stopped, so termination can
+    /// complete synchronously instead of going through `.terminateLater`.
+    var canTerminateImmediately: Bool {
+        switch machine.state {
+        case .stopped, .error: return true
+        default: return false
+        }
+    }
+
     init(configuration: VZVirtualMachineConfiguration, fullscreen: Bool) {
         machine = VZVirtualMachine(configuration: configuration)
         startFullscreen = fullscreen
@@ -101,8 +115,18 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     /// ACPI shutdown when the configuration or state does not permit saving.
     @MainActor
     func suspendAndQuit() async {
-        guard !isWindingDown else { return }
+        guard !isWindingDown else {
+            finishTermination()
+            return
+        }
         isWindingDown = true
+
+        // A save that never returns must not strand the app in .terminateLater.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            guard let self, !self.hasRepliedToTermination else { return }
+            Log.warn("Suspend did not finish in 30s. Exiting anyway.")
+            self.finishTermination()
+        }
 
         guard canSuspend, machine.state == .running else {
             await requestGuestShutdown()
@@ -113,7 +137,7 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             try await machine.pause()
             try await machine.saveMachineStateTo(url: Paths.savedState)
             Log.info("Suspended to disk.")
-            NSApp.reply(toApplicationShouldTerminate: true)
+            finishTermination()
         } catch {
             Log.warn("Suspend failed (\(error.localizedDescription)). Asking the guest to shut down.")
             try? FileManager.default.removeItem(at: Paths.savedState)
@@ -125,7 +149,7 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     @MainActor
     private func requestGuestShutdown() async {
         guard machine.canRequestStop else {
-            NSApp.reply(toApplicationShouldTerminate: true)
+            finishTermination()
             return
         }
         do {
@@ -134,8 +158,14 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             // guestDidStop(_:) replies to the termination request.
         } catch {
             Log.error("Shutdown request failed: \(error.localizedDescription)")
-            NSApp.reply(toApplicationShouldTerminate: true)
+            finishTermination()
         }
+    }
+
+    private func finishTermination() {
+        guard !hasRepliedToTermination else { return }
+        hasRepliedToTermination = true
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 
     private func fail(_ message: String) {
@@ -153,13 +183,13 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         Log.info("Guest powered off.")
         markInstalledIfNeeded()
-        NSApp.reply(toApplicationShouldTerminate: true)
+        isWindingDown = true
         NSApp.terminate(nil)
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         Log.error("Guest stopped unexpectedly: \(error.localizedDescription)")
-        NSApp.reply(toApplicationShouldTerminate: true)
+        isWindingDown = true
         NSApp.terminate(nil)
     }
 

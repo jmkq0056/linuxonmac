@@ -16,6 +16,8 @@ enum Paths {
     static var nvram: URL { bundle.appendingPathComponent("nvram") }
     static var machineIdentifier: URL { bundle.appendingPathComponent("machine-identifier") }
     static var savedState: URL { bundle.appendingPathComponent("state.vzvmsave") }
+    static var macAddress: URL { bundle.appendingPathComponent("mac-address") }
+    static var scanout: URL { bundle.appendingPathComponent("scanout") }
     static var installed: URL { bundle.appendingPathComponent("installed") }
 
     /// Whether the guest has actually been installed.

@@ -33,8 +33,8 @@ struct VMBuilder {
         config.bootLoader = bootLoader
 
         config.storageDevices = try makeStorage()
-        config.networkDevices = [Self.makeNetwork()]
-        config.graphicsDevices = [Self.makeGraphics()]
+        config.networkDevices = [try Self.makeNetwork()]
+        config.graphicsDevices = [try Self.makeGraphics()]
         config.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
         config.keyboards = [VZUSBKeyboardConfiguration()]
         config.audioDevices = [Self.makeAudio()]
@@ -116,27 +116,62 @@ struct VMBuilder {
         Log.info("Created a \(Tunables.diskSizeBytes / (1024 * 1024 * 1024)) GB sparse disk.")
     }
 
-    private static func makeNetwork() -> VZVirtioNetworkDeviceConfiguration {
+    /// The MAC has to be pinned, not generated per launch.
+    ///
+    /// Restoring a saved state fails with a bare "invalid argument" unless the
+    /// configuration matches the one that was saved, and a random MAC guarantees
+    /// it never does — so every resume silently degraded to a cold boot. It also
+    /// gave the guest a new DHCP lease, and therefore a new IP, on every launch.
+    private static func makeNetwork() throws -> VZVirtioNetworkDeviceConfiguration {
         let device = VZVirtioNetworkDeviceConfiguration()
         device.attachment = VZNATNetworkDeviceAttachment()
+        device.macAddress = try loadOrCreateMACAddress()
         return device
+    }
+
+    private static func loadOrCreateMACAddress() throws -> VZMACAddress {
+        if let stored = try? String(contentsOf: Paths.macAddress, encoding: .utf8),
+           let existing = VZMACAddress(string: stored.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return existing
+        }
+        let fresh = VZMACAddress.randomLocallyAdministered()
+        try fresh.string.write(to: Paths.macAddress, atomically: true, encoding: .utf8)
+        Log.info("Assigned a persistent MAC: \(fresh.string)")
+        return fresh
     }
 
     /// One scanout at the panel's true pixel size. Anything less is upscaled and blurry;
     /// readability is the guest's job via desktop scaling, not the host's via interpolation.
-    private static func makeGraphics() -> VZVirtioGraphicsDeviceConfiguration {
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        let scale = screen?.backingScaleFactor ?? 2.0
-        let points = screen?.frame.size ?? CGSize(width: 1280, height: 832)
-        let width = Int((points.width * scale).rounded())
-        let height = Int((points.height * scale).rounded())
-
+    ///
+    /// Pinned for the same reason as the MAC: a scanout derived from whatever
+    /// display happens to be attached would change the configuration whenever an
+    /// external monitor is plugged in, breaking restore. The view reconfigures
+    /// the guest's resolution live anyway, so the stored value only ever needs to
+    /// be a starting point.
+    private static func makeGraphics() throws -> VZVirtioGraphicsDeviceConfiguration {
+        let (width, height) = try loadOrCreateScanout()
         let graphics = VZVirtioGraphicsDeviceConfiguration()
         graphics.scanouts = [
             VZVirtioGraphicsScanoutConfiguration(widthInPixels: width, heightInPixels: height)
         ]
         Log.info("Display scanout: \(width)x\(height) native pixels.")
         return graphics
+    }
+
+    private static func loadOrCreateScanout() throws -> (Int, Int) {
+        if let stored = try? String(contentsOf: Paths.scanout, encoding: .utf8) {
+            let parts = stored.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "x")
+            if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) {
+                return (w, h)
+            }
+        }
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let scale = screen?.backingScaleFactor ?? 2.0
+        let points = screen?.frame.size ?? CGSize(width: 1280, height: 832)
+        let width = Int((points.width * scale).rounded())
+        let height = Int((points.height * scale).rounded())
+        try "\(width)x\(height)".write(to: Paths.scanout, atomically: true, encoding: .utf8)
+        return (width, height)
     }
 
     private static func makeAudio() -> VZVirtioSoundDeviceConfiguration {
