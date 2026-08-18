@@ -55,35 +55,40 @@ to **OpenGL 3.1**, *Tearing prevention* to **Never**.
 ## 5. Rosetta — running x86_64 Linux binaries
 
 The runner attaches Rosetta as a virtiofs share tagged `rosetta` whenever it is
-installed on the host. Register it with the kernel so x86_64 ELF binaries just
-execute:
+installed on the host. Mount it and register it as the interpreter for x86_64
+ELF binaries:
 
 ```sh
 sudo mkdir -p /mnt/rosetta
 echo 'rosetta /mnt/rosetta virtiofs ro,nofail 0 0' | sudo tee -a /etc/fstab
 sudo mount -a
-
-sudo dpkg --add-architecture amd64
-sudo apt update
-
-sudo tee /etc/systemd/system/rosetta-binfmt.service >/dev/null <<'UNIT'
-[Unit]
-Description=Register Rosetta as the x86_64 ELF interpreter
-After=local-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh -c 'echo ":rosetta:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:/mnt/rosetta/rosetta:CF" > /proc/sys/fs/binfmt_misc/register'
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-sudo systemctl enable --now rosetta-binfmt
 ```
 
-If you only ever run arm64 software, launch with `--no-rosetta` and skip this.
+Registration belongs in `/etc/binfmt.d/`, which `systemd-binfmt` reads at every
+boot — no custom unit required:
+
+```sh
+sudo tee /etc/binfmt.d/rosetta.conf >/dev/null <<'CONF'
+:rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/mnt/rosetta/rosetta:CF
+CONF
+
+sudo systemctl restart systemd-binfmt
+cat /proc/sys/fs/binfmt_misc/rosetta   # should print "enabled"
+```
+
+**The magic and the mask must be the same length — 20 bytes each.** A mask with
+one byte too many fails with nothing but `Invalid argument`, which names neither
+the field nor the length.
+
+To actually install x86_64 packages afterwards:
+
+```sh
+sudo dpkg --add-architecture amd64
+sudo apt update
+```
+
+If you only ever run arm64 software, launch with `--no-rosetta` and skip all of
+this.
 
 ## 6. Guest agent for a clean shutdown
 
