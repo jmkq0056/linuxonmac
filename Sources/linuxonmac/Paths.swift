@@ -1,16 +1,24 @@
 import Foundation
 
 /// Everything the VM owns lives in one bundle directory so it can be moved,
-/// backed up, or deleted as a unit.
+/// backed up, or deleted as a unit. Settings sit one level up, outside the
+/// bundle, so deleting and rebuilding the guest does not throw them away.
 enum Paths {
-    static let bundle: URL = {
+    static let support: URL = {
         let base = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("linuxonmac", isDirectory: true)
-            .appendingPathComponent("Debian.vm", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }()
+
+    static let bundle: URL = {
+        let base = support.appendingPathComponent("Debian.vm", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }()
+
+    static var settings: URL { support.appendingPathComponent("settings.json") }
 
     static var disk: URL { bundle.appendingPathComponent("disk.img") }
     static var nvram: URL { bundle.appendingPathComponent("nvram") }
@@ -31,13 +39,4 @@ enum Paths {
         let values = try? disk.resourceValues(forKeys: [.totalFileAllocatedSizeKey])
         return (values?.totalFileAllocatedSize ?? 0) > 2 * 1024 * 1024 * 1024
     }
-}
-
-enum Tunables {
-    /// Sparse — it only consumes what the guest actually writes.
-    static let diskSizeBytes: UInt64 = 96 * 1024 * 1024 * 1024
-    static let memoryBytes: UInt64 = 10 * 1024 * 1024 * 1024
-    static let cpuCount = 6
-    static let homeShareTag = "home"
-    static let rosettaShareTag = "rosetta"
 }

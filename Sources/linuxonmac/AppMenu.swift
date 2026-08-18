@@ -15,12 +15,21 @@ protocol VMActions: AnyObject {
     func revealVMBundle()
     func copySSHCommand()
     func openTerminalSession()
+    func openSettings()
+
+    /// Clamps, persists and applies an edit, reporting what it cost — notably
+    /// whether resume has just been taken off the table.
+    func applySettings(_ settings: Settings) -> SettingsOutcome
 
     var isPaused: Bool { get }
     var capturesSystemKeys: Bool { get }
     var clipboardSyncEnabled: Bool { get }
     var clipboardConnected: Bool { get }
     var sharedFolderURL: URL { get }
+
+    /// The settings the running `VZVirtualMachineConfiguration` was built from,
+    /// which is what a saved state would have to match.
+    var launchSettings: Settings { get }
 }
 
 /// Builds the menu bar and the status item.
@@ -79,6 +88,8 @@ final class MenuController: NSObject, NSMenuDelegate {
     private func appMenuItem() -> NSMenuItem {
         submenu("linuxonmac") { menu in
             add(menu, "About linuxonmac", #selector(about))
+            menu.addItem(.separator())
+            add(menu, "Settings…", #selector(showSettings), ",")
             menu.addItem(.separator())
             add(menu, "Hide linuxonmac", #selector(NSApplication.hide(_:)), "h")
             let hideOthers = NSMenuItem(
@@ -189,6 +200,8 @@ final class MenuController: NSObject, NSMenuDelegate {
         add(menu, "Sync Clipboard", #selector(toggleSync))
         add(menu, "Send Clipboard to Linux", #selector(pushClipboard))
         menu.addItem(.separator())
+        add(menu, "Settings…", #selector(showSettings))
+        menu.addItem(.separator())
         add(menu, "Shut Down Guest", #selector(shutDown))
         add(menu, "Suspend & Quit", #selector(suspendAndQuit))
     }
@@ -241,6 +254,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func revealBundle() { actions?.revealVMBundle() }
     @objc private func copySSH() { actions?.copySSHCommand() }
     @objc private func openTerminal() { actions?.openTerminalSession() }
+    @objc private func showSettings() { actions?.openSettings() }
 
     @objc private func openGuide() {
         NSWorkspace.shared.open(URL(string: "https://github.com/jmkq0056/linuxonmac/blob/main/docs/GUEST-SETUP.md")!)
@@ -256,6 +270,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         alert.informativeText = """
         Debian arm64 on Apple Virtualization.framework.
 
+        \(actions?.launchSettings.memoryGB ?? 0) GB · \(actions?.launchSettings.cpuCount ?? 0) processors
         Guest: \(GuestNetwork.guestIP ?? "starting…")
         Clipboard: \(actions?.clipboardConnected == true ? "bridged over vsock" : "connecting")
         Shared folder: \(actions?.sharedFolderURL.path ?? "—")

@@ -16,13 +16,18 @@ enum VMBuilderError: LocalizedError {
 
 struct VMBuilder {
     var isoURL: URL?
-    var shareURL: URL
-    var enableRosetta: Bool
+    var settings: Settings
 
     func makeConfiguration() throws -> VZVirtualMachineConfiguration {
+        // Clamped again here rather than trusted: a hand-edited settings.json
+        // reaches this point untouched, and `validate()` rejects the whole
+        // configuration for a number that is one gigabyte out of range.
+        let sizing = settings.clamped()
+
         let config = VZVirtualMachineConfiguration()
-        config.cpuCount = Self.clampedCPUCount()
-        config.memorySize = Self.clampedMemory()
+        config.cpuCount = sizing.cpuCount
+        config.memorySize = sizing.memoryBytes
+        Log.info("Machine: \(sizing.memoryGB) GB, \(sizing.cpuCount) processors.")
 
         let platform = VZGenericPlatformConfiguration()
         platform.machineIdentifier = try Self.loadOrCreateMachineIdentifier()
@@ -45,20 +50,6 @@ struct VMBuilder {
 
         try config.validate()
         return config
-    }
-
-    // MARK: - Sizing
-
-    private static func clampedCPUCount() -> Int {
-        let lo = VZVirtualMachineConfiguration.minimumAllowedCPUCount
-        let hi = VZVirtualMachineConfiguration.maximumAllowedCPUCount
-        return min(max(Tunables.cpuCount, lo), hi)
-    }
-
-    private static func clampedMemory() -> UInt64 {
-        let lo = VZVirtualMachineConfiguration.minimumAllowedMemorySize
-        let hi = VZVirtualMachineConfiguration.maximumAllowedMemorySize
-        return min(max(Tunables.memoryBytes, lo), hi)
     }
 
     // MARK: - Identity that must survive reboots
@@ -112,8 +103,8 @@ struct VMBuilder {
         }
         let handle = try FileHandle(forWritingTo: Paths.disk)
         defer { try? handle.close() }
-        try handle.truncate(atOffset: Tunables.diskSizeBytes)
-        Log.info("Created a \(Tunables.diskSizeBytes / (1024 * 1024 * 1024)) GB sparse disk.")
+        try handle.truncate(atOffset: VMConstants.defaultDiskSizeBytes)
+        Log.info("Created a \(VMConstants.defaultDiskSizeBytes / (1024 * 1024 * 1024)) GB sparse disk.")
     }
 
     /// The MAC has to be pinned, not generated per launch.
@@ -185,17 +176,17 @@ struct VMBuilder {
     }
 
     private func makeShares() throws -> [VZDirectorySharingDeviceConfiguration] {
-        try VZVirtioFileSystemDeviceConfiguration.validateTag(Tunables.homeShareTag)
-        let home = VZVirtioFileSystemDeviceConfiguration(tag: Tunables.homeShareTag)
+        try VZVirtioFileSystemDeviceConfiguration.validateTag(VMConstants.homeShareTag)
+        let home = VZVirtioFileSystemDeviceConfiguration(tag: VMConstants.homeShareTag)
         home.share = VZSingleDirectoryShare(
-            directory: VZSharedDirectory(url: shareURL, readOnly: false)
+            directory: VZSharedDirectory(url: settings.sharedFolderURL, readOnly: false)
         )
         var shares: [VZDirectorySharingDeviceConfiguration] = [home]
 
-        if enableRosetta {
+        if settings.enableRosetta {
             switch VZLinuxRosettaDirectoryShare.availability {
             case .installed:
-                let rosetta = VZVirtioFileSystemDeviceConfiguration(tag: Tunables.rosettaShareTag)
+                let rosetta = VZVirtioFileSystemDeviceConfiguration(tag: VMConstants.rosettaShareTag)
                 rosetta.share = try VZLinuxRosettaDirectoryShare()
                 shares.append(rosetta)
                 Log.info("Rosetta share attached — x86_64 Linux binaries will run.")

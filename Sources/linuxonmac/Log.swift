@@ -3,9 +3,7 @@ import Foundation
 /// Logs go to stdout for terminal runs and to a file for detached launches
 /// (via `open`), where stdout is discarded by LaunchServices.
 enum Log {
-    static let fileURL: URL = Paths.bundle
-        .deletingLastPathComponent()
-        .appendingPathComponent("linuxonmac.log")
+    static let fileURL: URL = Paths.support.appendingPathComponent("linuxonmac.log")
 
     private static let handle: FileHandle? = {
         let path = fileURL.path

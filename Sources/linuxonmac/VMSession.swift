@@ -12,8 +12,23 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
     private let startFullscreen: Bool
     let sharedFolderURL: URL
 
+    /// The settings the configuration this session is running was built from.
+    /// A saved state is only restorable into these exact numbers.
+    let launchSettings: Settings
+
     private var clipboard: ClipboardBridge?
     private var menus: MenuController?
+    private var splash: SplashWindow?
+    private var settingsWindow: SettingsWindowController?
+
+    /// Set when memory or CPU are edited away from `launchSettings`. Suspending
+    /// would then write a state file that no future launch could restore, so the
+    /// guest is shut down cleanly on quit instead.
+    private var resumeBlocked = false
+
+    /// Distinguishes the two launch paths for the splash, which have genuinely
+    /// different things to wait on.
+    private var didResume = false
 
     /// Set while a restart is in flight so `guestDidStop` boots again instead of
     /// terminating the app.
@@ -37,10 +52,11 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
         }
     }
 
-    init(configuration: VZVirtualMachineConfiguration, fullscreen: Bool, sharedFolderURL: URL) {
+    init(configuration: VZVirtualMachineConfiguration, settings: Settings) {
         machine = VZVirtualMachine(configuration: configuration)
-        startFullscreen = fullscreen
-        self.sharedFolderURL = sharedFolderURL
+        launchSettings = settings
+        startFullscreen = settings.startFullscreen
+        sharedFolderURL = settings.sharedFolderURL
 
         // Not every device combination can be frozen to disk. Ask once, up front,
         // so closing the window never blocks on a save that was always going to fail.
@@ -54,7 +70,7 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
 
         view = VZVirtualMachineView()
         view.virtualMachine = machine
-        view.capturesSystemKeys = true
+        view.capturesSystemKeys = settings.captureSystemKeys
         view.automaticallyReconfiguresDisplay = true
 
         window = NSWindow(
@@ -84,6 +100,12 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
         window.makeFirstResponder(view)
         NSApp.activate(ignoringOtherApps: true)
 
+        let splash = SplashWindow(
+            subtitle: "Debian · \(launchSettings.memoryGB) GB · \(launchSettings.cpuCount) processors"
+        )
+        self.splash = splash
+        splash.show(phase: .startingMachine)
+
         if startFullscreen {
             // Has to wait until the window is actually on screen, otherwise
             // AppKit silently drops the transition.
@@ -97,6 +119,7 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
                 } else {
                     try await machine.start()
                     Log.info("Booting.")
+                    splash.update(phase: .bootingGuest)
                 }
                 self.attachClipboardBridge()
             } catch {
@@ -110,15 +133,21 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
     @MainActor
     private func resumeFromDisk() async throws {
         let state = Paths.savedState
+        splash?.update(phase: .resumingState)
         do {
             try await machine.restoreMachineStateFrom(url: state)
             try? FileManager.default.removeItem(at: state)
             try await machine.resume()
             Log.info("Resumed from saved state.")
+            // The guest is already up, so the only thing still outstanding is
+            // the bridge reconnecting to the agent inside it.
+            didResume = true
+            splash?.update(phase: .connectingClipboard)
             attachClipboardBridge()
         } catch {
             Log.warn("Saved state could not be restored (\(error.localizedDescription)). Cold booting.")
             try? FileManager.default.removeItem(at: state)
+            splash?.update(phase: .bootingGuest)
             try await machine.start()
         }
     }
@@ -131,18 +160,29 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
               let socket = machine.socketDevices.first as? VZVirtioSocketDevice
         else { return }
         let bridge = ClipboardBridge(device: socket)
-        bridge.onStateChange = { connected in
+        bridge.isEnabled = SettingsStore.shared.settings.clipboardSyncEnabled
+        bridge.onStateChange = { [weak self] connected in
             Log.info("Clipboard bridge \(connected ? "connected" : "disconnected").")
+            // The agent only starts with the graphical session, so this is the
+            // first moment the guest is genuinely usable.
+            if connected { self?.splash?.dismiss() }
         }
         clipboard = bridge
         bridge.start()
+
+        // A guest without the agent installed never connects, and the splash
+        // must not outlive the boot it is describing. A resume has nothing left
+        // to wait for, so it gives up far sooner than a cold boot does.
+        splash?.armFallbackDismiss(after: didResume ? 20 : 75)
     }
 
     // MARK: - VMActions
 
     var isPaused: Bool { machine.state == .paused }
     var capturesSystemKeys: Bool { view.capturesSystemKeys }
-    var clipboardSyncEnabled: Bool { clipboard?.isEnabled ?? false }
+    /// Read from the store rather than the bridge so the menus show the right
+    /// state before the bridge exists — which is most of the boot.
+    var clipboardSyncEnabled: Bool { SettingsStore.shared.settings.clipboardSyncEnabled }
     var clipboardConnected: Bool { clipboard?.isConnected ?? false }
 
     func suspendAndQuitFromMenu() { NSApp.terminate(nil) }
@@ -178,12 +218,70 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
 
     func toggleFullScreen() { window.toggleFullScreen(nil) }
 
-    func toggleCaptureSystemKeys() { view.capturesSystemKeys.toggle() }
+    /// The menu toggles go through the settings store rather than poking the
+    /// view directly, so a switch flipped from the menu bar is still set the
+    /// next time the app launches.
+    func toggleCaptureSystemKeys() {
+        var next = SettingsStore.shared.settings
+        next.captureSystemKeys.toggle()
+        _ = applySettings(next)
+    }
 
     func toggleClipboardSync() {
-        guard let clipboard else { return }
-        clipboard.isEnabled.toggle()
-        Log.info("Clipboard sync \(clipboard.isEnabled ? "on" : "off").")
+        var next = SettingsStore.shared.settings
+        next.clipboardSyncEnabled.toggle()
+        let applied = applySettings(next).applied
+        Log.info("Clipboard sync \(applied.clipboardSyncEnabled ? "on" : "off").")
+    }
+
+    func openSettings() {
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController(actions: self)
+        }
+        settingsWindow?.presentWindow()
+    }
+
+    /// Memory and CPU count are part of the machine configuration, and
+    /// `restoreMachineStateFrom(url:)` fails with a bare "invalid argument"
+    /// whenever the configuration it is handed differs at all from the one the
+    /// state was saved from — the same failure the pinned MAC and scanout exist
+    /// to avoid.
+    ///
+    /// So a sizing change has to invalidate resume in *both* directions: any
+    /// state already on disk is deleted, and this session stops suspending on
+    /// quit, because the file it would write could never be restored either.
+    /// Setting the values back to what is running lifts both again.
+    func applySettings(_ requested: Settings) -> SettingsOutcome {
+        let applied = SettingsStore.shared.apply(requested)
+
+        view.capturesSystemKeys = applied.captureSystemKeys
+        clipboard?.isEnabled = applied.clipboardSyncEnabled
+
+        let sizingChanged = applied.memoryGB != launchSettings.memoryGB
+            || applied.cpuCount != launchSettings.cpuCount
+
+        if sizingChanged {
+            if FileManager.default.fileExists(atPath: Paths.savedState.path) {
+                try? FileManager.default.removeItem(at: Paths.savedState)
+                Log.warn("Deleted \(Paths.savedState.lastPathComponent): it was saved from a different configuration.")
+            }
+            if !resumeBlocked {
+                Log.warn("Resume disabled: \(applied.memoryGB) GB / \(applied.cpuCount) processors requested, \(launchSettings.memoryGB) GB / \(launchSettings.cpuCount) running. The next start will be a cold boot.")
+            }
+        } else if resumeBlocked {
+            Log.info("Memory and processors match the running machine again. Resume is back.")
+        }
+        resumeBlocked = sizingChanged
+
+        let needsRestart = sizingChanged
+            || applied.sharedFolderPath != launchSettings.sharedFolderPath
+            || applied.enableRosetta != launchSettings.enableRosetta
+
+        return SettingsOutcome(
+            applied: applied,
+            coldBootRequired: sizingChanged,
+            needsRestart: needsRestart
+        )
     }
 
     func pushClipboardToGuest() { clipboard?.pushNow() }
@@ -231,7 +329,11 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
             self.finishTermination()
         }
 
-        guard canSuspend, machine.state == .running else {
+        if resumeBlocked {
+            Log.warn("Memory or processors were changed this session. Saving state would produce a file no future launch could restore, so the guest is being shut down instead.")
+        }
+
+        guard canSuspend, !resumeBlocked, machine.state == .running else {
             await requestGuestShutdown()
             return
         }
@@ -272,6 +374,7 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
     }
 
     private func fail(_ message: String) {
+        splash?.dismiss()
         Log.error(message)
         let alert = NSAlert()
         alert.messageText = "linuxonmac could not start"

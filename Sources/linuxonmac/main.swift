@@ -4,11 +4,14 @@ import Virtualization
 
 // MARK: - Options
 
+/// Command line flags override the persisted settings for one run only. They
+/// are deliberately not written back: `--windowed` for a one-off install session
+/// should not silently turn fullscreen off forever.
 struct Options {
     var isoPath: String?
     var sharePath: String?
-    var rosetta = true
-    var fullscreen = true
+    var rosetta: Bool?
+    var fullscreen: Bool?
     var attachISO: Bool?
 }
 
@@ -25,11 +28,16 @@ func printUsage() {
                        been installed once.
       --no-iso         Boot from the disk only, never attach an installer.
       --share <path>   Host directory exposed to the guest over virtiofs.
-                       Defaults to your home directory. Mount tag: "home".
+                       Mount tag: "home".
       --no-rosetta     Skip the Rosetta share (arm64-only guest).
       --windowed       Start in a window instead of fullscreen on its own Space.
       --reset          Delete the VM bundle and start over. Destroys the guest.
       -h, --help       This text.
+
+    Memory, processors, the shared folder and the rest are edited in
+    Settings (Cmd-,) and stored in
+    ~/Library/Application Support/linuxonmac/settings.json.
+    The flags above override that file for one run only.
     """)
 }
 
@@ -57,6 +65,8 @@ func parseOptions() -> Options {
         case "-h", "--help":
             printUsage()
             exit(0)
+        case "--fullscreen":
+            options.fullscreen = true
         default:
             die("unknown option: \(argument)")
         }
@@ -120,22 +130,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let share = options.sharePath.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
-            ?? FileManager.default.homeDirectoryForCurrentUser
+        var settings = SettingsStore.shared.settings
+        if let share = options.sharePath { settings.sharedFolderPath = share }
+        if let rosetta = options.rosetta { settings.enableRosetta = rosetta }
+        if let fullscreen = options.fullscreen { settings.startFullscreen = fullscreen }
 
-        let builder = VMBuilder(
-            isoURL: resolveISO(options),
-            shareURL: share,
-            enableRosetta: options.rosetta
-        )
+        let builder = VMBuilder(isoURL: resolveISO(options), settings: settings)
 
         do {
             let configuration = try builder.makeConfiguration()
-            let session = VMSession(
-                configuration: configuration,
-                fullscreen: options.fullscreen,
-                sharedFolderURL: share
-            )
+            let session = VMSession(configuration: configuration, settings: settings)
             self.session = session
             session.start()
         } catch {
