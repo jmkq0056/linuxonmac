@@ -27,3 +27,6 @@ Package.resolved
 *.dmg
 *.nvram
 VMs/
+
+# Icon intermediates — scripts/make-icon.swift regenerates these
+Resources/AppIcon.iconset/

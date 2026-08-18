@@ -84,7 +84,7 @@ func resolveISO(_ options: Options) -> URL? {
     if let explicit = options.isoPath {
         return URL(fileURLWithPath: (explicit as NSString).expandingTildeInPath)
     }
-    if FileManager.default.fileExists(atPath: Paths.installed.path) { return nil }
+    if Paths.looksInstalled { return nil }
 
     let downloads = FileManager.default
         .urls(for: .downloadsDirectory, in: .userDomainMask)[0]
