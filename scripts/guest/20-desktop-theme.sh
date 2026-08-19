@@ -57,6 +57,7 @@ qfont() { printf '%s,%s,-1,5,%s,0,0,0,0,0,0,0,0,0,0,1' "$1" "$2" "$3"; }
 
 MODE="apply"
 [ "${1:-}" = "--verify" ] && MODE="verify"
+RUN_START="$(date '+%Y-%m-%d %H:%M:%S')"
 
 if [ "$MODE" = "apply" ]; then
 
@@ -385,14 +386,29 @@ inactiveBlend=33,36,42
 inactiveForeground=138,145,156
 COLEOF
 
+# plasma-apply-colorscheme short-circuits ("already set") when [General]
+# ColorScheme already names the scheme. That makes it unable to repair
+# Colors:* values that something else rewrote, so clear the marker keys and
+# force a genuine re-application every run.
+kwriteconfig6 --file kdeglobals --group General --key ColorScheme     --delete 2>/dev/null
+kwriteconfig6 --file kdeglobals --group General --key ColorSchemeHash --delete 2>/dev/null
 plasma-apply-colorscheme "${COLORSCHEME}" 2>&1 | sed 's/^/    /' || warn "plasma-apply-colorscheme failed"
 
 # Explicit accent colour (Plasma 6). Pinned rather than derived from the
 # wallpaper so the UI stays predictable.
+# Keep the accent from drifting with the wallpaper...
 kwriteconfig6 --file kdeglobals --group General --key accentColorFromWallpaper false
-kwriteconfig6 --file kdeglobals --group General --key AccentColor "10,132,255"
+# ...but do NOT pin an explicit AccentColor. Plasma 6 re-derives Colors:Selection
+# (and the decoration colours) from AccentColor when it is set, and its
+# contrast-safety pass turned #0A84FF into a duller 14,100,188. With the key
+# removed, the hand-tuned AuroraDark values are used verbatim.
+kwriteconfig6 --file kdeglobals --group General --key AccentColor --delete 2>/dev/null
 kwriteconfig6 --file kdeglobals --group General --key LastUsedCustomAccentColor "10,132,255"
-ok "accent pinned to #0A84FF"
+# Re-apply so anything the accent pass rewrote is restored.
+kwriteconfig6 --file kdeglobals --group General --key ColorScheme     --delete 2>/dev/null
+kwriteconfig6 --file kdeglobals --group General --key ColorSchemeHash --delete 2>/dev/null
+plasma-apply-colorscheme "${COLORSCHEME}" >/dev/null 2>&1
+ok "accent follows the AuroraDark scheme (#0A84FF), not wallpaper-derived"
 
 # ----------------------------------------------------------------------------
 # 5. Icons, cursor, widget style, Plasma style, window decorations
@@ -606,15 +622,25 @@ else
   # appmenu module; when that module is slow or absent, plasmashell blocks in
   # request_wait_answer and the whole shell wedges. The top bar keeps the
   # macOS *shape* without that failure mode.
+  # --- teardown, as its own call, retried until the shell reports zero -------
+  plasma_eval() {
+    timeout 180 gdbus call --session --dest org.kde.plasmashell \
+      --object-path /PlasmaShell --method org.kde.PlasmaShell.evaluateScript \
+      --timeout 150 "$1" 2>&1
+  }
+  for attempt in 1 2 3 4; do
+    REMAIN=$(plasma_eval '
+var e = panelIds;
+for (var i = 0; i < e.length; i++) { try { panelById(e[i]).remove(); } catch (err) {} }
+print("remaining=" + panelIds.length);')
+    printf '    teardown attempt %s: %s\n' "$attempt" "$(printf '%s' "$REMAIN" | tr -d "()',")"
+    case "$REMAIN" in *"remaining=0"*) break ;; esac
+    sleep 4
+  done
+
   PANEL_JS=$(mktemp)
   cat > "$PANEL_JS" <<'JSEOF'
 var log = [];
-
-// tear down whatever is there — this is what makes the script idempotent
-var existing = panelIds;
-for (var i = 0; i < existing.length; i++) {
-    try { panelById(existing[i]).remove(); } catch (e) { log.push("remove: " + e); }
-}
 
 // ---- bottom dock (built first: it is the simplest, so if anything goes
 // ---- wrong the user is still left with a usable launcher surface) --------
@@ -627,11 +653,12 @@ dock.alignment  = "center";
 dock.currentConfigGroup = ["General"];
 dock.writeConfig("panelOpacity", 1);   // opaque — blur stays off for VM perf
 
-// Give the bottom of a 801pt-tall logical desktop back to maximised windows.
-var hid = ["dodgewindows", "windowscover", "none"];
-for (var h = 0; h < hid.length; h++) {
-    try { dock.hiding = hid[h]; if (dock.hiding === hid[h]) break; } catch (e) {}
-}
+// Always visible, like the macOS Dock's default. "dodgewindows" was tried
+// first and does reclaim the 56pt strip for maximised windows, but it makes
+// the dock vanish the moment any window reaches the bottom of the screen,
+// which reads as "the dock is gone" rather than "the dock got out of the way".
+// A dock you can always see is worth 7% of an 801pt-tall logical desktop.
+dock.hiding = "none";
 
 var tasks = dock.addWidget("org.kde.plasma.icontasks");
 tasks.currentConfigGroup = ["General"];
@@ -664,9 +691,11 @@ bar.hiding     = "none";        // always visible
 bar.currentConfigGroup = ["General"];
 bar.writeConfig("panelOpacity", 1);
 
+// Kickoff keeps its default launcher icon: writing configuration.icon makes
+// its QML try to resolve the name as a file path relative to the plasmoid
+// directory ("QML Image: Cannot open: .../contents/ui/start-here-kde").
 var kick = bar.addWidget("org.kde.plasma.kickoff");
 kick.currentConfigGroup = ["General"];
-kick.writeConfig("icon", "start-here-kde");
 kick.writeConfig("compactDisplayStyle", "icon");
 
 var spacer = bar.addWidget("org.kde.plasma.panelspacer");
@@ -694,13 +723,11 @@ for (var i = 0; i < panelIds.length; i++) {
              " len=" + p.lengthMode + " float=" + p.floating +
              " hiding=" + p.hiding + " widgets=[" + p.widgetIds + "]");
 }
-print(log.join("\n"));
+print(log.join(" ;; "));
 JSEOF
 
-  PANEL_OUT=$(timeout 180 gdbus call --session --dest org.kde.plasmashell \
-      --object-path /PlasmaShell --method org.kde.PlasmaShell.evaluateScript \
-      --timeout 150 "$(cat "$PANEL_JS")" 2>&1)
-  printf '%s\n' "$PANEL_OUT" | sed 's/^/    /'
+  PANEL_OUT=$(plasma_eval "$(cat "$PANEL_JS")")
+  printf '%s\n' "$PANEL_OUT" | tr ';' '\n' | sed 's/^ *//;s/^/    /'
   rm -f "$PANEL_JS"
   # Deliberately NO plasmashell restart here. Restarting the shell tears down
   # every Wayland surface it owns at once, and on this VM that has been enough
@@ -1040,7 +1067,24 @@ var o=[];
 for (var i=0;i<panelIds.length;i++){var p=panelById(panelIds[i]);
 o.push("  panel "+p.id+"  loc="+p.location+"  height="+p.height+"  lengthMode="+p.lengthMode+"  align="+p.alignment+"  floating="+p.floating+"  hiding="+p.hiding);
 for (var j=0;j<p.widgetIds.length;j++){var w=p.widgetById(p.widgetIds[j]); o.push("      - "+w.type);}}
-print(o.join("\n"));' 2>&1 | sed 's/^/ /' || echo "  (plasmashell not answering — panels not verifiable)" 
+print(o.join(" ;; "));' 2>&1 | tr ';' '\n' | sed 's/^ *//;s/^/  /' || echo "  (plasmashell not answering — panels not verifiable)" 
+
+printf '\n\033[1m-- Panel sanity assertions --\033[0m\n'
+NPANEL=$(grep -cE '^plugin=org\.kde\.panel$' "${HOME}/.config/plasma-org.kde.plasma.desktop-appletsrc" 2>/dev/null)
+printf '  panel containments in appletsrc: %s (expected 2)\n' "${NPANEL:-0}"
+case "${NPANEL:-0}" in
+  2) printf '  \033[1;32mOK\033[0m exactly the top bar and the dock\n' ;;
+  0) printf '  \033[1;31mFAIL\033[0m no panel at all — re-run this script\n' ;;
+  *) printf '  \033[1;31mFAIL\033[0m %s panels — teardown did not complete, re-run this script\n' "${NPANEL}" ;;
+esac
+# evaluateScript returns success to the D-Bus caller even when the submitted
+# JS throws: the error text comes back inside the reply string and is logged
+# by plasmashell. A call that "succeeded" therefore proves nothing on its own,
+# so check the journal for THIS run specifically.
+NERR=$(journalctl --user -u plasma-plasmashell.service --since "$RUN_START" --no-pager 2>/dev/null | grep -ci 'syntaxerror')
+printf '  plasmashell SyntaxErrors during this run: %s\n' "${NERR:-?}"
+[ "${NERR:-0}" = "0" ] && printf '  \033[1;32mOK\033[0m no JavaScript errors\n' \
+                       || printf '  \033[1;31mFAIL\033[0m see: journalctl --user -u plasma-plasmashell -e\n'
 
 printf '\n\033[1m-- GTK --\033[0m\n'
 grep -hE 'gtk-(theme|icon-theme|font|cursor-theme)-name|prefer-dark|rgba|hintstyle' "${HOME}/.config/gtk-3.0/settings.ini" 2>/dev/null | sed 's/^/  /'

@@ -25,6 +25,13 @@ Run it as `jmkq`, not root — it calls `sudo` itself where it needs to. Every
 person or agent may be touching this box at a time; waiting for the dpkg lock is
 always better than failing on it.
 
+Because the macOS home is mounted at `~/mac`, the repo checkout is reachable
+from inside the guest without copying anything:
+
+```sh
+bash ~/mac/Documents/linuxonmac/scripts/guest/10-dev-environment.sh
+```
+
 ---
 
 ## What is installed
@@ -269,17 +276,43 @@ also enables the Linux desktop target and installs its build dependencies
 (`libgtk-3-dev`, `liblzma-dev`, `ninja-build`, `clang`, `pkg-config`,
 `libglu1-mesa`).
 
+`flutter doctor` on this guest, verbatim:
+
+```
+[✓] Flutter (Channel stable, 3.47.0, on Debian GNU/Linux 13 (trixie) 6.12.101+deb13-arm64)
+[✗] Android toolchain — Unable to locate Android SDK
+[✗] Chrome — Cannot find Chrome executable at google-chrome
+[✓] Linux toolchain — develop for Linux desktop
+[✓] Connected device (1 available)
+[✓] Network resources
+```
+
+And an actual build, not just a version string:
+
+```
+$ flutter create demo_app && cd demo_app && flutter build linux --debug
+[1/1] Linux SDK
+  ├─ [1/3] linux-arm64-debug/linux-arm64-flutter-gtk     4.4s
+  ├─ [2/3] linux-arm64-profile/linux-arm64-flutter-gtk   1,416ms
+  └─ [3/3] linux-arm64-release/linux-arm64-flutter-gtk   1,327ms
+✓ Built build/linux/arm64/debug/bundle/demo_app
+```
+
 What you can and cannot build from this guest:
 
-- **Linux desktop** — yes, natively.
-- **Web** — yes; the Dart-to-JS/wasm compiler is host-arch independent. You need
-  a browser in the guest, or run `flutter run -d web-server` and open the URL
-  from macOS.
-- **Android** — possible, but not set up here: it needs the Android SDK
-  command-line tools plus an emulator, and a nested emulator inside a
-  Virtualization.framework guest has no hardware acceleration available to it.
-  Plug in a physical device over USB, or build the APK here and install it from
-  macOS.
+- **Linux desktop** — yes, natively, verified above. The `[✓] Linux toolchain`
+  line is what the `libgtk-3-dev` / `ninja-build` / `clang` / `pkg-config`
+  packages are there for.
+- **Web** — the compiler works, but `flutter doctor` reports no Chrome because
+  none is installed. Either `sudo apt install chromium` and
+  `export CHROME_EXECUTABLE=/usr/bin/chromium`, or skip the browser entirely
+  with `flutter run -d web-server` and open the printed URL from Safari on
+  macOS. The second option is lighter and is the recommended one here.
+- **Android** — the toolchain is intentionally *not* installed. It needs the
+  Android SDK command-line tools plus an emulator, and a nested emulator inside
+  a Virtualization.framework guest gets no hardware acceleration, so it would be
+  a trap. Attach a physical device over USB, or build the APK here and install
+  it from macOS.
 - **iOS/macOS** — impossible from Linux at all; those targets require Xcode.
   Since `~/mac` is your real macOS home, the natural split is to keep the
   project under `~/mac/…`, edit and run Linux/web builds from the guest, and do
@@ -288,20 +321,38 @@ What you can and cannot build from this guest:
 The stage is skippable with `SKIP_FLUTTER=1` because the clone plus engine
 artifacts run to a few GB.
 
-**A warning learned the hard way:** `flutter build linux --release` saturates
-all six vCPUs, and while it runs this VM stops answering SSH *and ICMP* — it
-looks hung from the Mac side when it is only busy. The guest has 6 vCPUs and
-~9.7 GB of RAM, and the Mac is running other things behind it. Run heavy builds
-under `nice`, and cap the parallelism, if you want to keep a shell responsive:
+**A warning learned the hard way.** An unconstrained
+`flutter build linux --release` took this guest down. It saturated every vCPU
+for long enough that `systemd-logind` missed its three-minute watchdog and was
+killed; `plasmashell` then died repeatedly and `sshd` stopped completing
+logins. The VM had to be cold-booted. (It has since been given 8 vCPUs and
+15 GB, up from 6 and 9.7 GB, which helps but does not make the problem go away.)
+
+From the outside this is indistinguishable from a crash: the guest stops
+answering SSH *and* ICMP while the host still shows the VM process pinned near
+100% of every core.
+
+So cap heavy builds. A debug build finishes in seconds and verifies the same
+toolchain:
 
 ```sh
-nice -n 15 flutter build linux --release
-nice -n 15 make -j3          # rather than -j$(nproc)
+flutter build linux --debug                  # seconds, and proves the toolchain
+
+nice -n 19 flutter build linux --release     # when you really need release
+nice -n 19 make -j4                          # not -j$(nproc)
 ```
 
-The same applies to `pnpm install` on a large monorepo and to any
-`cargo`/`ninja` build. It is not a fault in the setup; it is a 6-vCPU machine
-being asked for everything at once.
+Better still, put the build in a cgroup that cannot starve the desktop:
+
+```sh
+systemd-run --user --scope -p CPUQuota=400% -p MemoryMax=6G --nice=19 \
+  flutter build linux --release
+```
+
+The same applies to `pnpm install` on a large monorepo, `cargo build`, and any
+`ninja`/`make` invocation that defaults to `-j$(nproc)`. It is not a fault in
+the setup — it is a shared VM being asked for everything at once, with a
+desktop session and a watchdog that both need a slice.
 
 ---
 
@@ -402,15 +453,49 @@ repos there over ownership mismatches across the virtiofs boundary.
 
 ## Shell
 
-The script writes `~/.config/devenv/shell.sh` and sources it from both
-`~/.bashrc` (interactive shells) and `~/.profile` (login shells and the desktop
-session). Regenerating it is safe; the hook lines are added exactly once, keyed
-on a marker.
+The config is split into two generated files, and the split is the important
+part:
 
-Everything above the `case $- in *i*)` guard is environment — `PATH`,
-`JAVA_HOME`, `FNM_DIR`, `PNPM_HOME`, `DOCKER_HOST`, `EDITOR` — so it applies to
-scripts and non-interactive SSH commands too. Below the guard is interactive-only
-convenience, so non-interactive shells pay nothing for it:
+| file | contents | sourced from |
+|---|---|---|
+| `~/.config/devenv/env.sh` | **environment only** — `PATH`, `JAVA_HOME`, `FNM_DIR`, `PNPM_HOME`, `DOCKER_HOST`, `EDITOR`. Strict POSIX `sh`, no bash-isms, no zsh-isms. | `~/.zshenv`, top of `~/.bashrc`, `~/.profile` |
+| `~/.config/devenv/interactive.sh` | aliases, `mongo-dev`, `mkcd`, history settings, fnm/direnv/fzf wiring, bash prompt | `~/.bashrc`, `~/.zshrc` |
+
+Regenerating both is safe; each hook line is added exactly once, keyed on a
+marker, so the script can be re-run any number of times.
+
+### Why environment and interactive are separate files
+
+Because **which shell this account uses is not fixed**, and the environment has
+to survive that. Halfway through setting this machine up, the login shell was
+changed from `/bin/bash` to `/usr/bin/zsh` by other work happening on the same
+box. Everything still looked fine from an interactive terminal — and
+`ssh guest 'node --version'` started answering `command not found`, because
+the config was hooked into `.bashrc` only.
+
+Each shell finds the environment by a different route, so all three are wired:
+
+| shell | file | when it is read |
+|---|---|---|
+| zsh | `~/.zshenv` | **every** invocation — interactive, login, and `ssh guest cmd` |
+| bash | `~/.bashrc` | `ssh guest cmd` too, but *only* above the stock `case $- in *i*) ;; *) return;; esac` guard, so the hook is prepended, not appended |
+| sh / bash | `~/.profile` | login shells, and the Plasma session's environment |
+
+`interactive.sh` guards itself with the same `case $- in *i*)` test and branches
+on `$BASH_VERSION` / `$ZSH_VERSION`, because `fnm env`, `direnv hook` and fzf's
+key bindings each need a different incantation per shell. It deliberately sets
+a prompt **only for bash** — the zsh prompt belongs to whatever theme
+configuration owns `~/.config/shell/zsh.sh`, and clobbering it would be rude.
+
+The failure this prevents is invisible from a terminal and breaks everything
+scripted, which is exactly the kind of bug that survives a casual "looks fine to
+me" check. Verify it the way it actually fails:
+
+```sh
+ssh guest 'node --version'     # not: ssh guest, then node --version
+```
+
+The interactive half gives you:
 
 - **History that is actually useful**: 100k entries, deduplicated
   (`erasedups`), timestamped, appended rather than overwritten so parallel
@@ -419,7 +504,7 @@ convenience, so non-interactive shells pay nothing for it:
   `Alt-C` directory jump), backed by `fdfind` so it respects `.gitignore` and
   skips `.git`.
 - **direnv** hook, for per-project env vars via `.envrc`.
-- A prompt showing user@host, cwd, and the current git branch.
+- A prompt showing user@host, cwd, and the current git branch (bash only).
 - Aliases for the everyday shapes (`ll`, `gs`, `gd`, `gl`, `dps`, `ports`,
   `serve`, `mkcd`, `mac`) and the `mongo-dev` helper.
 
@@ -473,26 +558,55 @@ Not "the binary exists" — each of these compiled, started, or round-tripped:
 | pnpm | `pnpm init` + `pnpm add lodash` → `lodash 4.18.1` required at runtime |
 | Podman | `podman run --rm alpine uname -m` → `aarch64`, rootless, overlay driver |
 | **MongoDB** | `mongo:8` container up, `mongosh` inserted a doc, `countDocuments()` → 1 |
+| **Flutter** | `flutter create` + `flutter build linux --debug` → `✓ Built build/linux/arm64/debug/bundle/demo_app` |
 | git | commit authored as `Whosegonnacarrytheboatsnthelogs <saimibrahim679@gmail.com>` |
 | global gitignore | `.DS_Store`, `.venv/`, `__pycache__/`, `.env.local` ignored; `.env` and `node_modules` correctly *not* ignored globally |
-| non-interactive shell | `ssh guest 'node --version'` → `v24.19.0` (see the `.bashrc` note below) |
+| non-interactive shell | `ssh guest 'node --version'` → `v24.19.0` on a fresh, unmultiplexed connection (see below) |
 
-### The non-interactive PATH trap
+Podman, MongoDB and the Express round-trip were re-run after the guest was cold
+booted, so they are confirmed to survive a restart rather than merely having
+worked once during setup.
 
-Debian's stock `~/.bashrc` opens with
+### The non-interactive PATH trap, twice
+
+This bit me in two different ways, and both are worth writing down because both
+were invisible from an interactive terminal.
+
+**First:** Debian's stock `~/.bashrc` opens with
 
 ```sh
 case $- in *i*) ;; *) return;; esac
 ```
 
-so anything appended to the end of it is **never** reached by a non-interactive
-shell — which is exactly what `ssh guest 'npm run build'`, a systemd unit, or a
-tool shelling out gets. The first version of this setup appended its hook there
-and `ssh guest node --version` reported `node: command not found` while an
-interactive login worked perfectly.
+so anything *appended* to it is never reached by a non-interactive shell — which
+is exactly what `ssh guest 'npm run build'`, a systemd unit, or a tool shelling
+out gets. The hook now goes at the **top** of `.bashrc`, above that guard.
 
-The script now inserts the hook at the *top* of `.bashrc`, above that guard, and
-`shell.sh` carries its own interactivity guard so the aliases, prompt and fzf
-bindings are still skipped for non-interactive shells. Environment (`PATH`,
-`JAVA_HOME`, `DOCKER_HOST`) is set for everything; convenience is set only for
-humans.
+**Second:** the account's login shell was later changed from bash to zsh by
+other work on the same machine, and zsh never reads `.bashrc` at all. Node
+silently vanished from every scripted invocation again. The fix is
+`~/.zshenv` — the one zsh startup file read on *every* invocation, non-login and
+non-interactive included.
+
+Verified after both fixes, on a fresh unmultiplexed connection:
+
+```
+$ ssh guest 'node --version'
+v24.19.0
+$ ssh guest 'npm --version; pnpm --version; claude --version'
+11.17.0
+11.22.0
+2.1.235 (Claude Code)
+$ ssh guest 'echo $JAVA_HOME; echo $DOCKER_HOST'
+/usr/lib/jvm/java-21-openjdk-arm64
+unix:///run/user/1000/podman/podman.sock
+```
+
+### Re-running the script
+
+Verified idempotent: the full script was re-run end to end on the recovered
+guest after a cold boot and finished `EXIT=0` with no warnings, reinstalling
+nothing and duplicating no config lines. `shellcheck -S warning` is clean.
+
+Re-running is also the repair path — if a crash interrupts setup, or another
+tool rewrites a dotfile, re-run it and the environment is put back.
