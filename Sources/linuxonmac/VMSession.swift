@@ -81,7 +81,7 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
         )
         super.init()
 
-        window.title = "Debian"
+        window.title = "Linux"
         window.contentView = view
         window.delegate = self
         window.center()
