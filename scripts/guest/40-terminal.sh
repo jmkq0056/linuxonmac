@@ -712,3 +712,13 @@ zsh  -i -c 'true' >/dev/null 2>&1 || true
 bash -i -c 'true' >/dev/null 2>&1 || true
 
 log "done. Open a NEW Konsole window (or re-login) for everything to apply."
+
+# Cmd+S and Cmd+Q arrive as Ctrl+S/Ctrl+Q after the keyd remap, which are XON/XOFF
+# flow control — the terminal appears to freeze with no indication why. Nothing
+# uses software flow control on a local terminal, so turn it off.
+if ! grep -q 'stty -ixon' "$HOME/.zshrc" 2>/dev/null; then
+    printf '\n# Cmd+S/Cmd+Q become Ctrl+S/Ctrl+Q; without this they freeze the terminal.\n[[ $- == *i* ]] && stty -ixon 2>/dev/null\n' >> "$HOME/.zshrc"
+fi
+if ! grep -q 'stty -ixon' "$HOME/.bashrc" 2>/dev/null; then
+    printf '\n# Cmd+S/Cmd+Q become Ctrl+S/Ctrl+Q; without this they freeze the terminal.\n[[ $- == *i* ]] && stty -ixon 2>/dev/null\n' >> "$HOME/.bashrc"
+fi

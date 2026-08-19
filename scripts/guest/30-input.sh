@@ -236,7 +236,7 @@ FILES = {
     'sessionui.rc': {
         'edit_copy':       'Ctrl+Shift+C; Ctrl+Ins; Meta+C',
         'edit_paste':      'Ctrl+Shift+V; Shift+Ins; Meta+V',
-        'select-all':      'Meta+A',                 # no upstream default
+        'select-all':      'Ctrl+Shift+A; Meta+A',   # keep a reachable default
         'edit_find':       'Ctrl+Shift+F; Meta+F',
         'edit_find_next':  'F3; Meta+G',
         'edit_find_prev':  'Shift+F3; Meta+Shift+G',
@@ -245,7 +245,7 @@ FILES = {
         'enlarge-font':    'Ctrl++; Ctrl+=; Meta++; Meta+=',
         'shrink-font':     'Ctrl+-; Meta+-',
         'reset-font-size': 'Ctrl+Alt+0; Meta+0',
-        'clear-history':   'Meta+K',                 # no upstream default; Cmd+K in Terminal.app
+        'clear-history':   'Ctrl+Shift+K; Meta+K',   # keep a reachable default; Cmd+K in Terminal.app
     },
     # MainWindow actions (window/tab-level)
     'konsoleui.rc': {
