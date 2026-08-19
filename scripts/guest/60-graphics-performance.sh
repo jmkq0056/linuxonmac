@@ -40,3 +40,16 @@ kwriteconfig6 --file kwinrc --group Compositing --key AnimationSpeed 0 2>/dev/nu
 kwriteconfig6 --file kdeglobals --group KDE --key AnimationDurationFactor 0
 
 echo "graphics: QtQuick=software, scale=1, per-pixel effects off"
+
+# Converge re-runs every guest script at each login and was measured at 34s of
+# CPU, landing in exactly the window where the desktop feels slowest. It has no
+# deadline, so it yields to anything drawing the screen.
+DROPIN="$HOME/.config/systemd/user/linuxonmac-converge.service.d"
+mkdir -p "$DROPIN"
+cat > "$DROPIN/priority.conf" <<'CONF'
+[Service]
+Nice=19
+CPUWeight=20
+IOSchedulingClass=idle
+CONF
+systemctl --user daemon-reload 2>/dev/null || true
