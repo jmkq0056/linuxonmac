@@ -71,7 +71,12 @@ final class VMSession: NSObject, VZVirtualMachineDelegate, NSWindowDelegate, VMA
         view = VZVirtualMachineView()
         view.virtualMachine = machine
         view.capturesSystemKeys = settings.captureSystemKeys
-        view.automaticallyReconfiguresDisplay = true
+        // Left off deliberately. Following the window size means the guest
+        // composites at the panel's full pixel count, and with no GPU in the
+        // guest every one of those pixels is CPU work. A fixed half-resolution
+        // scanout is a quarter of the work and upscales by exactly 2, so it
+        // stays sharp instead of being interpolated.
+        view.automaticallyReconfiguresDisplay = false
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 832),
