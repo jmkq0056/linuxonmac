@@ -20,7 +20,7 @@
 
 set -uo pipefail
 
-SCROLL_FACTOR="${SCROLL_FACTOR:-0.5}"   # 1.0 = libinput default. Lower = slower/calmer.
+SCROLL_FACTOR="${SCROLL_FACTOR:-1}"   # libinput default. 0.5 felt sluggish in use.
 NATURAL_SCROLL="${NATURAL_SCROLL:-true}"
 RELOAD_GLOBAL_SHORTCUTS="${RELOAD_GLOBAL_SHORTCUTS:-1}"
 

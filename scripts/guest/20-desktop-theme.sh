@@ -811,10 +811,12 @@ kwriteconfig6 --file kscreenlockerrc --group Greeter --key Theme "org.kde.breeze
 # Chrome gets the glass; content stays opaque. That is also where macOS puts
 # it -- menu bar, Dock and panels are translucent, document windows are not.
 #
-# Set LOM_GLASS=0 for the flat, absolute-fastest look.
+# Off by default: this guest has no GPU at all, so Mesa falls back to llvmpipe
+# and every blurred pixel is CPU work across 2940x1912. It measurably degrades
+# scrolling. Set LOM_GLASS=1 to turn the glass back on.
 # ----------------------------------------------------------------------------
 step "Liquid glass, tuned for software rendering"
-if [ "${LOM_GLASS:-1}" = "0" ]; then
+if [ "${LOM_GLASS:-0}" = "0" ]; then
   kwriteconfig6 --file kwinrc --group Plugins --key blurEnabled false
   GLASS_PANEL_OPACITY=1
   ok "LOM_GLASS=0 — flat mode, blur off, panels opaque"
@@ -1021,7 +1023,7 @@ dbus-send --session --dest=org.kde.KWin --type=method_call /KWin org.kde.KWin.re
   && ok "kwin reconfigured"
 # reconfigure re-reads settings but does not always instantiate a plugin that
 # was off at startup, so load/unload the blur effect explicitly.
-if [ "${LOM_GLASS:-1}" = "0" ]; then
+if [ "${LOM_GLASS:-0}" = "0" ]; then
   timeout 20 qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.unloadEffect blur >/dev/null 2>&1
 else
   timeout 20 qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.loadEffect blur >/dev/null 2>&1
