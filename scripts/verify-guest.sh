@@ -37,8 +37,14 @@ export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 \
        DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 D="Apple Inc. Virtual USB Digitizer"
 V=1452; P=33030
-echo "natural_scroll=$(kreadconfig6 --file kwinrc --group Libinput --group $V --group $P --group "$D" --key NaturalScroll)"
-echo "scroll_factor=$(kreadconfig6 --file kwinrc --group Libinput --group $V --group $P --group "$D" --key ScrollFactor)"
+# kcminputrc, not kwinrc. KWin's own D-Bus setters write per-device libinput
+# config to kcminputrc; a [Libinput] group in kwinrc is read by nothing. An
+# earlier version of this script checked kwinrc and reported a false pass.
+echo "natural_scroll=$(kreadconfig6 --file kcminputrc --group Libinput --group $V --group $P --group "$D" --key NaturalScroll)"
+echo "scroll_factor=$(kreadconfig6 --file kcminputrc --group Libinput --group $V --group $P --group "$D" --key ScrollFactor)"
+echo "blur_disabled=$(kreadconfig6 --file kwinrc --group Plugins --key blurEnabled)"
+echo "converge_enabled=$(systemctl --user is-enabled linuxonmac-converge 2>/dev/null)"
+echo "cmd_copy=$(kreadconfig6 --file kdeglobals --group Shortcuts --key Copy)"
 echo "icon_theme=$(kreadconfig6 --file kdeglobals --group Icons --key Theme)"
 echo "login_shell=$(getent passwd jmkq | cut -d: -f7)"
 echo "node=$(command -v node >/dev/null && node --version || echo MISSING)"
@@ -60,7 +66,10 @@ get() { echo "$raw" | grep "^$1=" | cut -d= -f2-; }
 
 echo "input"
 check "natural scroll"        "true"  "$(get natural_scroll)"
-check "scroll factor"         "0.4"   "$(get scroll_factor)"
+check "scroll factor"         "1"     "$(get scroll_factor)"
+check "blur disabled (llvmpipe)" "false" "$(get blur_disabled)"
+present "Cmd+C binding"       "$(get cmd_copy)"
+check "converge service"      "enabled" "$(get converge_enabled)"
 echo "shell and tooling"
 check "login shell"           "/usr/bin/zsh" "$(get login_shell)"
 present "node (non-interactive)"  "$(get node)"

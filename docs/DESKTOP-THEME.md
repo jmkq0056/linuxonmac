@@ -141,6 +141,27 @@ The download is pinned to `v3.5.0` and checked against a SHA-256 before
 install; if the network is unavailable the script skips it and says so rather
 than half-installing.
 
+### Ligatures: the font has them, Konsole will not draw them
+
+Proven with HarfBuzz rather than assumed:
+
+```
+$ hb-shape --features=-liga,-calt JetBrainsMono-Regular.ttf '!='
+[exclam=0+600|equal=1+600]
+
+$ hb-shape JetBrainsMono-Regular.ttf '!='
+[SPC=0+600|exclam_equal.liga=1+600]          <- single ligature glyph
+```
+
+`=>`, `===`, `<=` and `|>` all resolve to `.liga` glyphs the same way, in both
+the Debian JetBrains Mono and the patched Nerd Font build.
+
+**Konsole still renders them as separate characters.** Konsole lays text out on
+a fixed character grid and does not run ligature substitution across cells —
+that is a limitation of its renderer, not of the font or this configuration.
+The ligature-capable font is set as the system `fixed` font, so editors that
+shape text normally (Kate, VS Code, anything Qt or GTK) do show the ligatures.
+
 > Note: a full patched `JetBrainsMono Nerd Font` also exists under
 > `~/.local/share/fonts/NerdFonts/` — installed by something else, not by this
 > script. It is harmless and selectable, but nothing here depends on it.
@@ -230,23 +251,133 @@ QML applets. And it never restarts plasmashell.
 
 ---
 
-## Performance
+## Performance, glass, and eye comfort
 
-This runs in a VM with software rendering (`llvmpipe`), so the script is
-careful to stay out of the way:
+### The measurement that drives every decision here
 
-- **No compositing effects are enabled.** `kwinrc [Plugins] blurEnabled=false`
-  and `contrastEnabled=false` are left exactly as found, and both panels are
-  set to `panelOpacity=1` (**opaque**) precisely so they do not need blur to
-  look right. A translucent panel without blur looks washed out; an opaque one
-  looks deliberate and costs nothing.
-- **`AnimationDurationFactor=0` is left untouched.**
-- `gtk-enable-animations=0` matches GTK apps to that.
-- Breeze rather than an SVG-heavy third-party style.
-- The wallpaper is a 1.2 MB JPEG, not a multi-megabyte PNG.
+```
+$ qdbus6 org.kde.KWin /KWin supportInformation
+Compositing Type: OpenGL
+OpenGL vendor string: Mesa
+OpenGL renderer string: llvmpipe (LLVM 19.1.7, 128 bits)
+Driver: LLVMpipe
+GPU class: Unknown
+```
 
-`--verify` prints these three guard values on every run so a regression is
-visible immediately.
+`/sys/class/drm/card0` is a `virtio-pci` device and `/usr/lib/aarch64-linux-gnu/dri/`
+contains only `kms_swrast_dri.so` — there is **no 3D driver**. Apple's
+Virtualization.framework does not expose GPU acceleration to Linux guests, so
+every composited pixel on this desktop is rasterised on the CPU, at
+2560x1602 (4.1 megapixels) per frame.
+
+That single fact decides where translucency is affordable.
+
+### Where the glass goes
+
+KWin's blur cost scales with the **area** it has to blur:
+
+| Surface | Blurred area | Share of screen | Decision |
+|---|---|---|---|
+| Top bar | 2560x64 ≈ 164k px | ~4% | **glass** |
+| Dock | ~600x112 ≈ 67k px | ~2% | **glass** |
+| A Konsole window | ~3.7M px | ~90% | **opaque** |
+
+Blurring a terminal means re-blurring most of the screen every time the window
+damages — i.e. on every keystroke. That is what "laggy" felt like. Chrome gets
+the glass, content stays opaque. This is also how macOS does it: the menu bar
+and Dock are translucent, document windows are not.
+
+Settings:
+
+```
+kwinrc [Plugins]     blurEnabled=true       contrastEnabled=false
+kwinrc [Effect-blur] BlurStrength=6         NoiseStrength=0
+panels               panelOpacity=2         (2 = translucent)
+Konsole              Opacity=1              Blur=false
+```
+
+`contrastEnabled` (Background Contrast) stays **off**: it is a second
+near-full-screen pass layered on top of blur for a small legibility gain.
+`NoiseStrength=0` because film grain on a blurred surface is a per-pixel cost
+for a texture nobody asked for.
+
+**Escape hatch:** `LOM_GLASS=0 ./scripts/guest/20-desktop-theme.sh` reverts to
+the flat, maximum-speed look — blur off, panels opaque — in one run.
+
+### Smoothness
+
+```
+kwinrc [Compositing] LatencyPolicy = Low  ->  High
+```
+
+`LatencyPolicy` controls how much time KWin leaves itself to render before the
+next vblank. `Low` tells it to start as late as possible to minimise input
+latency. That is the right call on a GPU and the wrong one here: a software
+render regularly overruns the time left and the frame gets dropped. Dropped
+frames *are* the stutter. Giving the renderer headroom costs about one frame
+(~16 ms) of input latency and buys consistent frame delivery.
+
+Decorative effects that cost something and earn nothing on a software renderer
+are disabled: `shakecursor`, `zoom`, `wobblywindows`, `magiclamp`, `glide`,
+`scale`, `fallapart`, `slidingpopups`, `sheet`, `dimscreen`, `dimadmin`.
+
+`AnimationDurationFactor=0` is **left at 0**. On a GPU, animation is what makes
+a desktop feel smooth; on llvmpipe it is what makes it feel like it is
+struggling. Instant is smoother than janky.
+
+> KWin's `reconfigure` re-reads settings but does not reliably instantiate a
+> plugin that was disabled at startup, so the script explicitly calls
+> `loadEffect blur` (or `unloadEffect`) and then asserts the result against
+> `loadedEffects`.
+
+### Eye comfort
+
+- **Night Color on, constant 4600 K.** It is a gamma ramp applied at scanout —
+  literally free to render — and it is the biggest single "comfortable to look
+  at for hours" lever available.
+- **Softened contrast.** Dark themes that pair near-white text with near-black
+  panels are harsh. Foreground came down from `228,231,236` to `222,226,232`
+  and the darkest surface came up from `26,28,32` to `30,33,38`. Still well
+  clear of WCAG AA; noticeably easier to sit in front of.
+- **Grayscale antialiasing + slight hinting** (see the font section) keeps
+  glyph edges soft rather than fringed.
+
+### The remaining lever (outside this script)
+
+The largest single win available is **fewer pixels**. At 2560x1602 llvmpipe
+composites 4.1 MP per frame; at 1920x1200 it is 2.3 MP — about 44% less work,
+for every frame, forever. That is the guest's display mode, set by the host VM
+configuration rather than by this script, so it is flagged here rather than
+changed.
+
+---
+
+## Login screen and splash
+
+Debian ships `sddm-theme-debian-breeze`, and with no `[Theme] Current` set,
+SDDM falls back to a **light theme carrying the Debian logo** — the white
+Debian screen on every boot. Fixed by:
+
+```
+/etc/sddm.conf.d/20-theme.conf
+    [Theme]
+    Current=breeze
+    CursorTheme=Bibata-Modern-Classic
+    Font=Inter
+
+/usr/share/sddm/themes/breeze/theme.conf.user
+    [General]
+    type=image
+    background=/usr/local/share/linuxonmac/aurora.jpg
+    color=#12141a
+```
+
+SDDM runs as its own user and cannot read `/home`, so the wallpaper is
+published to `/usr/local/share/linuxonmac/aurora.jpg`.
+
+The Plasma splash screen is **disabled entirely** (`ksplashrc [KSplash]
+Theme=None, Engine=none`) so the session goes straight to the desktop with no
+logo in between. The lock screen uses the same Aurora image.
 
 ---
 
@@ -295,6 +426,24 @@ kdeglobals/KDE/AnimationDuration           0
 -- Cursor --
   /usr/share/icons/Bibata-Modern-Classic/cursors : 145 cursors
 
+-- Panel sanity assertions --
+  panel containments in appletsrc: 2 (expected 2)
+  OK exactly the top bar and the dock
+  plasmashell SyntaxErrors during this run: 0
+  OK no JavaScript errors
+
+-- Login screen / splash / glass --
+  sddm theme            = breeze
+  sddm background       = /usr/local/share/linuxonmac/aurora.jpg
+  plasma splash         = None / engine=none
+  blur enabled          = true (strength 6)
+  background-contrast   = false (kept off deliberately)
+  GL renderer           = llvmpipe (LLVM 19.1.7, 128 bits)
+  LatencyPolicy         = High
+  NightColor            = true @ 4600K
+  konsole opacity/blur  = 1 / false
+  panel opacity (1=opaque 2=glass) = 2 2
+
 -- Wallpaper --
   /home/jmkq/.local/share/wallpapers/Aurora/contents/images/2940x1912.jpg
   1215145 bytes, (2940, 1912) RGB
@@ -315,8 +464,13 @@ Most of this applies live. These do not:
 | **GTK settings / gsettings** | live for newly launched GTK apps only. |
 | **Konsole profile** | applies to new Konsole windows; existing tabs keep their profile. |
 | **Lock screen wallpaper** | next lock. |
+| **Blur / panel translucency** | **live** — the script calls `loadEffect blur` and verifies it. |
+| **Night Color** | **live** on `reconfigure`. |
+| **SDDM login theme + background** | **next boot** (SDDM only reads its config at start). |
+| **Splash screen removal** | **next login**. |
 
-Nothing here requires a reboot.
+Nothing here requires a reboot, but the login screen and splash changes are
+only visible on the next boot.
 
 ---
 

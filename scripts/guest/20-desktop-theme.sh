@@ -266,11 +266,11 @@ IntensityAmount=0
 IntensityEffect=0
 
 [Colors:View]
-BackgroundNormal=26,28,32
-BackgroundAlternate=32,35,40
+BackgroundNormal=30,33,38
+BackgroundAlternate=36,39,45
 DecorationFocus=10,132,255
 DecorationHover=10,132,255
-ForegroundNormal=228,231,236
+ForegroundNormal=222,226,232
 ForegroundInactive=145,152,163
 ForegroundActive=10,132,255
 ForegroundLink=100,210,255
@@ -280,8 +280,8 @@ ForegroundNeutral=255,159,10
 ForegroundPositive=50,215,75
 
 [Colors:Window]
-BackgroundNormal=36,39,45
-BackgroundAlternate=43,47,54
+BackgroundNormal=40,44,50
+BackgroundAlternate=47,51,58
 DecorationFocus=10,132,255
 DecorationHover=10,132,255
 ForegroundNormal=228,231,236
@@ -294,8 +294,8 @@ ForegroundNeutral=255,159,10
 ForegroundPositive=50,215,75
 
 [Colors:Button]
-BackgroundNormal=48,52,60
-BackgroundAlternate=58,63,72
+BackgroundNormal=52,57,65
+BackgroundAlternate=62,67,77
 DecorationFocus=10,132,255
 DecorationHover=10,132,255
 ForegroundNormal=228,231,236
@@ -380,7 +380,7 @@ ForegroundPositive=50,215,75
 [WM]
 activeBackground=46,50,58
 activeBlend=46,50,58
-activeForeground=235,238,243
+activeForeground=228,232,238
 inactiveBackground=33,36,42
 inactiveBlend=33,36,42
 inactiveForeground=138,145,156
@@ -534,10 +534,14 @@ TOP = (18, 20, 26)   # #12141A
 BOT = (9, 10, 13)    # #090A0D
 
 # (cx, cy, radius, colour, strength) in normalised coords
+# Translucent panels blur whatever is behind them, so the wallpaper has to
+# carry actual colour or the "glass" reads as flat grey. These are pushed
+# harder than a plain desktop backdrop would need.
 GLOWS = (
-    (0.20, 0.80, 0.68, (16,  78, 168), 0.90),   # deep blue, lower left
-    (0.82, 0.16, 0.58, (58,  38, 128), 0.55),   # indigo,    upper right
-    (0.52, 0.55, 0.30, (10, 132, 255), 0.14),   # accent core, very subtle
+    (0.18, 0.82, 0.72, (18,  92, 200), 1.15),   # deep blue,   lower left
+    (0.84, 0.14, 0.62, (76,  44, 168), 0.85),   # indigo,      upper right
+    (0.52, 0.58, 0.34, (10, 132, 255), 0.30),   # accent core
+    (0.92, 0.86, 0.40, (14, 118, 152), 0.34),   # teal,        lower right
 )
 
 img = Image.new("RGB", (SW, SH))
@@ -639,7 +643,11 @@ print("remaining=" + panelIds.length);')
   done
 
   PANEL_JS=$(mktemp)
-  cat > "$PANEL_JS" <<'JSEOF'
+  # 1 = opaque, 2 = translucent (glass). Substituted before the JS is sent.
+  cat > "$PANEL_JS" <<JSEOF
+var PANEL_OPACITY = ${GLASS_PANEL_OPACITY:-2};
+JSEOF
+  cat >> "$PANEL_JS" <<'JSEOF'
 var log = [];
 
 // ---- bottom dock (built first: it is the simplest, so if anything goes
@@ -651,7 +659,7 @@ dock.floating   = true;
 dock.lengthMode = "fit";        // shrink-wraps to its icons, like a Dock
 dock.alignment  = "center";
 dock.currentConfigGroup = ["General"];
-dock.writeConfig("panelOpacity", 1);   // opaque — blur stays off for VM perf
+dock.writeConfig("panelOpacity", PANEL_OPACITY);
 
 // Always visible, like the macOS Dock's default. "dodgewindows" was tried
 // first and does reclaim the 56pt strip for maximised windows, but it makes
@@ -689,7 +697,7 @@ bar.lengthMode = "fill";
 bar.alignment  = "center";
 bar.hiding     = "none";        // always visible
 bar.currentConfigGroup = ["General"];
-bar.writeConfig("panelOpacity", 1);
+bar.writeConfig("panelOpacity", PANEL_OPACITY);
 
 // Kickoff keeps its default launcher icon: writing configuration.icon makes
 // its QML try to resolve the name as a file path relative to the plasmoid
@@ -733,6 +741,128 @@ JSEOF
   # every Wayland surface it owns at once, and on this VM that has been enough
   # to take the compositor down with it.
 fi
+
+# ----------------------------------------------------------------------------
+# 8b. Login screen + splash: no white, no distro branding
+#
+# Debian ships sddm-theme-debian-breeze and, with no [Theme] Current set, SDDM
+# falls back to a light theme carrying the Debian logo. That is the white
+# Debian screen you see on every boot. Point SDDM at the plain Breeze theme,
+# hand it the Aurora wallpaper, and drop the splash entirely so the session
+# comes up without a logo in between.
+# ----------------------------------------------------------------------------
+step "Login screen and splash (removing the white Debian screens)"
+
+# SDDM runs as its own user and cannot read /home, so publish the wallpaper.
+SHARED_WALL=/usr/local/share/linuxonmac/aurora.jpg
+if [ -f "$WALL_IMG" ]; then
+  sudo install -d -m 0755 /usr/local/share/linuxonmac
+  sudo install -m 0644 "$WALL_IMG" "$SHARED_WALL"
+fi
+
+if [ -d /usr/share/sddm/themes/breeze ]; then
+  sudo install -d -m 0755 /etc/sddm.conf.d
+  sudo tee /etc/sddm.conf.d/20-theme.conf >/dev/null <<SDDMEOF
+[Theme]
+Current=breeze
+CursorTheme=${CURSOR_THEME}
+CursorSize=${CURSOR_SIZE}
+Font=${UI_FONT}
+SDDMEOF
+  # theme.conf.user is SDDM's supported per-theme override file.
+  sudo tee /usr/share/sddm/themes/breeze/theme.conf.user >/dev/null <<SDDMTEOF
+[General]
+type=image
+background=${SHARED_WALL}
+color=#12141a
+niceBackground=${SHARED_WALL}
+SDDMTEOF
+  ok "SDDM theme = breeze (was Debian's branded default), background = Aurora"
+else
+  warn "sddm breeze theme not installed; leaving login screen alone"
+fi
+
+# No splash at all -> straight to the desktop, no distro logo.
+kwriteconfig6 --file ksplashrc --group KSplash --key Theme  "None"
+kwriteconfig6 --file ksplashrc --group KSplash --key Engine "none"
+ok "Plasma splash screen disabled (seamless start, no Debian logo)"
+
+# Lock screen: same wallpaper, no branding.
+kwriteconfig6 --file kscreenlockerrc --group Greeter --key Theme "org.kde.breezedark.desktop"
+
+# ----------------------------------------------------------------------------
+# 8c. Liquid glass, tuned for a SOFTWARE renderer
+#
+# Measured on this guest (kwin supportInformation):
+#     OpenGL renderer string: llvmpipe (LLVM 19.1.7, 128 bits)
+#     Driver: LLVMpipe        Compositing Type: OpenGL
+#     virtio-pci GPU, /usr/lib/.../dri has only kms_swrast -- no 3D driver.
+#
+# So every composited pixel is rasterised on the CPU. KWin's blur cost scales
+# with the AREA it blurs, which decides where glass is affordable:
+#
+#   top bar   2560x64  =  164k px  ~4% of the screen   -> cheap, keep glass
+#   dock     ~600x112  =   67k px  ~2% of the screen   -> cheap, keep glass
+#   a Konsole window  =  ~3.7M px  ~90% of the screen  -> blurred every time
+#                                                         the window damages.
+#                                                         That is the "laggy
+#                                                         while typing" feel.
+#
+# Chrome gets the glass; content stays opaque. That is also where macOS puts
+# it -- menu bar, Dock and panels are translucent, document windows are not.
+#
+# Set LOM_GLASS=0 for the flat, absolute-fastest look.
+# ----------------------------------------------------------------------------
+step "Liquid glass, tuned for software rendering"
+if [ "${LOM_GLASS:-1}" = "0" ]; then
+  kwriteconfig6 --file kwinrc --group Plugins --key blurEnabled false
+  GLASS_PANEL_OPACITY=1
+  ok "LOM_GLASS=0 — flat mode, blur off, panels opaque"
+else
+  kwriteconfig6 --file kwinrc --group Plugins --key blurEnabled true
+  kwriteconfig6 --file kwinrc --group Effect-blur --key BlurStrength  6
+  kwriteconfig6 --file kwinrc --group Effect-blur --key NoiseStrength 0
+  GLASS_PANEL_OPACITY=2   # 0=adaptive 1=opaque 2=translucent
+  ok "blur on for panels (strength 6); noise off — it is a per-pixel cost"
+fi
+# Background-contrast is a second near-full-screen pass on top of blur for a
+# small legibility gain. Never worth it on llvmpipe.
+kwriteconfig6 --file kwinrc --group Plugins --key contrastEnabled false
+
+# Terminal stays OPAQUE: it is the largest, most frequently damaged surface on
+# the screen, and blurring it is what actually made typing feel slow.
+KONSOLE_OPACITY=1
+KONSOLE_BLUR=false
+ok "Konsole opaque (largest damage region — glass here is what caused the lag)"
+
+# ---- smoothness --------------------------------------------------------
+# LatencyPolicy decides how much time KWin leaves itself to render before the
+# next vblank. "Low" tells it to start as late as possible to minimise input
+# latency -- which is the right call on a GPU and the wrong one here, because
+# a software render regularly overruns the remaining time and drops the frame.
+# Dropped frames are exactly the stutter being reported. Giving the renderer
+# headroom costs about one frame (~16ms) of input latency and buys consistent
+# frame delivery.
+kwriteconfig6 --file kwinrc --group Compositing --key LatencyPolicy "High"
+kwriteconfig6 --file kwinrc --group Compositing --key AllowTearing  false
+ok "LatencyPolicy Low -> High (trade ~16ms latency for consistent frames)"
+
+# Effects that cost something and earn nothing here.
+for e in shakecursor zoom wobblywindows magiclamp glide scale fallapart \
+         slidingpopups sheet dimscreen dimadmin; do
+  kwriteconfig6 --file kwinrc --group Plugins --key "${e}Enabled" false
+done
+ok "disabled decorative effects (shakecursor, zoom, wobbly, magiclamp, glide, ...)"
+
+# ---- eye comfort -------------------------------------------------------
+# Night Color is a gamma ramp on the output: it costs nothing to render and is
+# the single biggest "comfortable to look at" lever on a panel you stare at.
+kwriteconfig6 --file kwinrc --group NightColor --key Active true
+kwriteconfig6 --file kwinrc --group NightColor --key Mode "Constant"
+kwriteconfig6 --file kwinrc --group NightColor --key NightTemperature 4600
+kwriteconfig6 --file kwinrc --group NightColor --key DayTemperature   4600
+ok "Night Color on, constant 4600K (warm, free — it is just a gamma ramp)"
+
 
 # ----------------------------------------------------------------------------
 # 9. GTK applications should match
@@ -781,13 +911,13 @@ fi
 # ----------------------------------------------------------------------------
 step "Configuring Konsole (${MONO_FONT} + Nerd Font glyph fallback)"
 mkdir -p "${HOME}/.local/share/konsole"
-cat > "${HOME}/.local/share/konsole/AuroraDark.colorscheme" <<'KCSEOF'
+cat > "${HOME}/.local/share/konsole/AuroraDark.colorscheme" <<KCSEOF
 [Background]
-Color=26,28,32
+Color=30,33,38
 [BackgroundFaint]
-Color=26,28,32
+Color=30,33,38
 [BackgroundIntense]
-Color=26,28,32
+Color=30,33,38
 [Color0]
 Color=45,49,57
 [Color0Faint]
@@ -837,21 +967,22 @@ Color=158,164,173
 [Color7Intense]
 Color=245,247,250
 [Foreground]
-Color=228,231,236
+Color=220,224,230
 [ForegroundFaint]
 Color=170,177,187
 [ForegroundIntense]
 Color=255,255,255
 [General]
-Blur=false
+Blur=${KONSOLE_BLUR:-true}
 ColorRandomization=false
 Description=Aurora Dark
-Opacity=1
+Opacity=${KONSOLE_OPACITY:-0.82}
 Wallpaper=
 KCSEOF
 
 cat > "${HOME}/.local/share/konsole/Aurora.profile" <<KPEOF
 [Appearance]
+Blur=${KONSOLE_BLUR:-true}
 ColorScheme=AuroraDark
 Font=$(qfont "${MONO_FONT}" 11 400)
 UseFontLineChararacters=true
@@ -888,6 +1019,19 @@ ok "Konsole profile 'Aurora' + colour scheme installed and set as default"
 step "Reloading the running session"
 dbus-send --session --dest=org.kde.KWin --type=method_call /KWin org.kde.KWin.reconfigure 2>/dev/null \
   && ok "kwin reconfigured"
+# reconfigure re-reads settings but does not always instantiate a plugin that
+# was off at startup, so load/unload the blur effect explicitly.
+if [ "${LOM_GLASS:-1}" = "0" ]; then
+  timeout 20 qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.unloadEffect blur >/dev/null 2>&1
+else
+  timeout 20 qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.loadEffect blur >/dev/null 2>&1
+fi
+LOADED=$(timeout 20 qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.loadedEffects 2>/dev/null | tr '\n' ' ')
+case " $LOADED " in
+  *" blur "*) ok "blur effect is LOADED in the running compositor" ;;
+  *)          [ "${LOM_GLASS:-1}" = "0" ] && ok "blur unloaded (flat mode)" \
+                                          || warn "blur did not load: $LOADED" ;;
+esac
 # KGlobalSettings::notifyChange -> 0 Palette, 1 Font, 2 Style, 3 Settings, 4 Icon, 5 Cursor
 for t in 0 1 2 3 4 5; do
   dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange \
@@ -929,7 +1073,7 @@ printf '%-42s %s\n' "kwinrc/decoration/BorderSize"      "$(kreadconfig6 --file k
 printf '%-42s %s\n' "konsolerc/DefaultProfile"          "$(kreadconfig6 --file konsolerc --group 'Desktop Entry' --key DefaultProfile)"
 
 printf '\n\033[1m-- Performance guards (must stay as-is) --\033[0m\n'
-printf '%-42s %s\n' "kwinrc/Plugins/blurEnabled"        "$(kreadconfig6 --file kwinrc --group Plugins --key blurEnabled)"
+printf '%-42s %s\n' "kwinrc/Plugins/blurEnabled"        "$(kreadconfig6 --file kwinrc --group Plugins --key blurEnabled)  (glass: on by request)"
 printf '%-42s %s\n' "kwinrc/Plugins/contrastEnabled"    "$(kreadconfig6 --file kwinrc --group Plugins --key contrastEnabled)"
 printf '%-42s %s\n' "kdeglobals/KDE/AnimationDuration"  "$(kreadconfig6 --file kdeglobals --group KDE --key AnimationDurationFactor)"
 
@@ -1085,6 +1229,21 @@ NERR=$(journalctl --user -u plasma-plasmashell.service --since "$RUN_START" --no
 printf '  plasmashell SyntaxErrors during this run: %s\n' "${NERR:-?}"
 [ "${NERR:-0}" = "0" ] && printf '  \033[1;32mOK\033[0m no JavaScript errors\n' \
                        || printf '  \033[1;31mFAIL\033[0m see: journalctl --user -u plasma-plasmashell -e\n'
+
+printf '\n\033[1m-- Login screen / splash / glass --\033[0m\n'
+printf '  sddm theme            = %s\n' "$(sed -n 's/^Current=//p' /etc/sddm.conf.d/20-theme.conf 2>/dev/null)"
+printf '  sddm background       = %s\n' "$(sed -n 's/^background=//p' /usr/share/sddm/themes/breeze/theme.conf.user 2>/dev/null)"
+printf '  plasma splash         = %s / engine=%s\n' "$(kreadconfig6 --file ksplashrc --group KSplash --key Theme)" "$(kreadconfig6 --file ksplashrc --group KSplash --key Engine)"
+printf '  blur enabled          = %s (strength %s)\n' "$(kreadconfig6 --file kwinrc --group Plugins --key blurEnabled)" "$(kreadconfig6 --file kwinrc --group Effect-blur --key BlurStrength)"
+printf '  background-contrast   = %s (kept off deliberately)\n' "$(kreadconfig6 --file kwinrc --group Plugins --key contrastEnabled)"
+printf '  GL renderer           = %s\n' "$(timeout 25 qdbus6 org.kde.KWin /KWin supportInformation 2>/dev/null | sed -n 's/^OpenGL renderer string: //p')"
+printf '  LatencyPolicy         = %s\n' "$(kreadconfig6 --file kwinrc --group Compositing --key LatencyPolicy)"
+printf '  NightColor            = %s @ %sK\n' "$(kreadconfig6 --file kwinrc --group NightColor --key Active)" "$(kreadconfig6 --file kwinrc --group NightColor --key NightTemperature)"
+printf '  loaded effects        = %s\n' "$(timeout 25 qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.loadedEffects 2>/dev/null | tr '\n' ' ')"
+printf '  konsole opacity/blur  = %s / %s\n' "$(sed -n 's/^Opacity=//p' ${HOME}/.local/share/konsole/AuroraDark.colorscheme 2>/dev/null)" "$(sed -n 's/^Blur=//p' ${HOME}/.local/share/konsole/AuroraDark.colorscheme 2>/dev/null)"
+printf '  panel opacity (1=opaque 2=glass) = %s\n' \
+  "$(awk '/^\[Containments\]\[[0-9]+\]\[General\]$/{g=1;next} /^\[/{g=0} g&&/^panelOpacity=/{sub(/panelOpacity=/,"");printf "%s ",$0}' \
+     "${HOME}/.config/plasma-org.kde.plasma.desktop-appletsrc" 2>/dev/null)"
 
 printf '\n\033[1m-- GTK --\033[0m\n'
 grep -hE 'gtk-(theme|icon-theme|font|cursor-theme)-name|prefer-dark|rgba|hintstyle' "${HOME}/.config/gtk-3.0/settings.ini" 2>/dev/null | sed 's/^/  /'
